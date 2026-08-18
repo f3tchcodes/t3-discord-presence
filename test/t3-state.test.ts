@@ -124,6 +124,24 @@ describe("T3 presence source state", () => {
         expect(serialized).not.toContain("secret command");
     });
 
+    it("replaces path-like titles and safely truncates Unicode metadata", () => {
+        const longTitle = `${"a".repeat(255)}😀tail`;
+        const state = stateWith([{
+            ...thread(),
+            title: "C:\\private\\thread",
+            modelSelection: { instanceId: "~/private/provider", model: longTitle },
+        }], [project("project-1", "/home/alice/private-project")]);
+        const selected = selectPresenceSource(state, { now });
+
+        expect(selected.projectTitle).toBe("private project");
+        expect(selected.threadTitle).toBe("private thread");
+        expect(selected.provider).toBeUndefined();
+        expect([...(selected.model ?? "")]).toHaveLength(256);
+        expect(selected.model?.endsWith("😀")).toBe(true);
+        expect(JSON.stringify(selected)).not.toContain("C:\\\\private");
+        expect(JSON.stringify(selected)).not.toContain("/home/alice");
+    });
+
     it("looks up the selected project and tolerates a missing project", () => {
         const known = selectPresenceSource(stateWith([thread()]), { now });
         const missing = selectPresenceSource(

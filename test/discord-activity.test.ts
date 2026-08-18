@@ -209,4 +209,36 @@ describe("Discord activity builder", () => {
         expect(serialized).not.toContain("workspace");
         expect(serialized).not.toContain("worktree");
     });
+
+    it("does not publish absolute paths even when metadata is visible", () => {
+        const activity = buildDiscordActivity(source({
+            projectTitle: "C:\\private\\customer-project",
+            threadTitle: "/home/alice/private-thread",
+            model: "\\\\server\\private\\model",
+            provider: "~/private/provider",
+        }), visible);
+        const serialized = JSON.stringify(activity);
+
+        expect(activity).toEqual({
+            details: "in T3 Code",
+            state: "editing code",
+            startTimestamp: Date.parse("2026-08-18T11:22:33.000Z"),
+        });
+        expect(serialized).not.toContain("private");
+        expect(serialized).not.toContain("alice");
+    });
+
+    it("removes bidi controls and lone surrogates from display text", () => {
+        const activity = buildDiscordActivity(source({
+            projectTitle: "safe\u202Ename\uD800",
+            model: "gpt\u2066-5\u2069",
+            provider: "Codex",
+        }), visible);
+        const serialized = JSON.stringify(activity);
+
+        expect(serialized).not.toContain("\u202E");
+        expect(serialized).not.toContain("\u2066");
+        expect(serialized).not.toContain("\u2069");
+        expect(serialized).not.toContain("\uD800");
+    });
 });

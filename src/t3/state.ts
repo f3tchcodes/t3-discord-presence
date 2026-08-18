@@ -1,3 +1,4 @@
+import { sanitizePresenceText } from "../utils/presence-text.js";
 import {
     mapActivity,
     SAFE_ACTIVITY_LABELS,
@@ -111,10 +112,12 @@ function identity(value: unknown): string | undefined {
 }
 
 function displayText(value: unknown): string | undefined {
-    if (typeof value !== "string") return undefined;
-    const trimmed = value.trim();
-    if (trimmed.length === 0) return undefined;
-    return trimmed.slice(0, 256);
+    return sanitizePresenceText(value, 256);
+}
+
+function displayTitle(value: unknown, fallback: string): string | undefined {
+    if (typeof value !== "string" || value.trim().length === 0) return undefined;
+    return displayText(value) ?? fallback;
 }
 
 function timestamp(value: unknown): string | undefined {
@@ -134,7 +137,7 @@ function sequence(value: unknown): number | undefined {
 function normalizeProject(value: unknown): PresenceProjectState | undefined {
     const project = asRecord(value);
     const id = identity(project?.id);
-    const title = displayText(project?.title);
+    const title = displayTitle(project?.title, "private project");
     return id !== undefined && title !== undefined ? { id, title } : undefined;
 }
 
@@ -149,7 +152,7 @@ function normalizeThread(
     const thread = asRecord(value);
     const id = identity(thread?.id);
     const projectId = identity(thread?.projectId);
-    const title = displayText(thread?.title);
+    const title = displayTitle(thread?.title, "private thread");
     if (thread === undefined || id === undefined || projectId === undefined || title === undefined) {
         return undefined;
     }

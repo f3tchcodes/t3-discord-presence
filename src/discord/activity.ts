@@ -4,6 +4,7 @@ import type {
     SelectedPresenceSource,
     SelectedPresenceStatus,
 } from "../t3/state.js";
+import { sanitizePresenceText } from "../utils/presence-text.js";
 import type { DiscordActivity } from "./types.js";
 
 export const DISCORD_ACTIVITY_TEXT_LIMIT = 128;
@@ -54,12 +55,7 @@ function safeActivity(source: SelectedPresenceSource): string {
 }
 
 function boundedText(value: string, maximum = DISCORD_ACTIVITY_TEXT_LIMIT): string {
-    const printable = [...value]
-        .map(character => {
-            const codePoint = character.codePointAt(0) ?? 0;
-            return codePoint <= 31 || codePoint === 127 ? " " : character;
-        })
-        .join("");
+    const printable = value.replace(/[\p{Cc}\p{Cf}\p{Cs}]+/gu, " ");
     const normalized = printable.replace(/\s+/g, " ").trim();
     const characters = [...normalized];
     if (characters.length <= maximum) return normalized;
@@ -77,9 +73,9 @@ function contextDetails(
     config: PresenceConfig,
 ): string {
     const context = [
-        ...(config.showProject && source.projectTitle !== undefined ? [source.projectTitle] : []),
-        ...(config.showThread && source.threadTitle !== undefined ? [source.threadTitle] : []),
-    ];
+        ...(config.showProject ? [sanitizePresenceText(source.projectTitle)] : []),
+        ...(config.showThread ? [sanitizePresenceText(source.threadTitle)] : []),
+    ].filter((value): value is string => value !== undefined);
     if (context.length === 0) return "in T3 Code";
     const active = source.status === "running"
         || source.status === "starting"
@@ -95,9 +91,9 @@ function modelDetails(
     config: PresenceConfig,
 ): string | undefined {
     const details = [
-        ...(config.showProvider && source.provider !== undefined ? [source.provider] : []),
-        ...(config.showModel && source.model !== undefined ? [source.model] : []),
-    ];
+        ...(config.showProvider ? [sanitizePresenceText(source.provider)] : []),
+        ...(config.showModel ? [sanitizePresenceText(source.model)] : []),
+    ].filter((value): value is string => value !== undefined);
     return details.length === 0 ? undefined : boundedText(details.join(" · "));
 }
 
