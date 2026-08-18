@@ -1,34 +1,65 @@
 # t3-discord-presence
 
-`t3-discord-presence` is a small background daemon that shows current T3 Code agent activity as Discord Rich Presence. It starts at user login, waits quietly while T3 Code or Discord is closed, and reconnects when either application returns.
+[![npm](https://img.shields.io/npm/v/t3-discord-presence?logo=npm)](https://www.npmjs.com/package/t3-discord-presence)
+[![CI](https://github.com/f3tchcodes/t3-discord-presence/actions/workflows/ci.yml/badge.svg)](https://github.com/f3tchcodes/t3-discord-presence/actions/workflows/ci.yml)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+![AI](https://img.shields.io/badge/AI-informational-blue)
 
-It does not modify or inject into T3 Code, inspect the screen, or read process memory. It discovers T3 Code's loopback server, authenticates through T3's supported pairing flow with read-only access, subscribes to the local state API, reduces that state to privacy-safe labels, and sends the result to the Discord desktop application's local RPC interface.
-
-## Requirements
-
-- Node.js 22 or newer. The Node.js 22 and 24 LTS lines are tested in CI.
-- T3 Code Desktop. For first-time authorization, the app automatically uses the CLI bundled with the verified Desktop installation, then falls back to a supported global `t3` command.
-- Discord Desktop running whenever you want Rich Presence to appear. Discord in a browser is not sufficient.
-- Windows, macOS, or Linux. Startup is installed for the current user and does not require root or administrator access under normal conditions.
+Discord Rich Presence for T3 Code. It runs quietly in the background, starts at login, and reconnects automatically when T3 Code or Discord returns.
 
 ## Install
 
-Install the package globally, then run it once:
+Requirements: Node.js 22+, T3 Code Desktop, and Discord Desktop.
 
 ```sh
 npm install -g t3-discord-presence
 t3-discord-presence
 ```
 
-That is the complete setup. The package includes the public Discord Application ID `1539247632227246150`, so there is no Discord Developer Portal setup, client-ID environment variable, bot token, or client secret to configure.
+That first run installs startup for the current user, authorizes with T3 when available, and starts one background daemon. Running it again safely repairs startup and never creates a duplicate daemon.
 
-Running `t3-discord-presence` without a command is idempotent. It installs or repairs startup for the current user, attempts initial authorization when T3 Code is open, and ensures the daemon is running. Repeating it does not create another startup registration or daemon process. The explicit `t3-discord-presence install` command performs the same setup and remains available for scripts.
+No Discord application setup, client ID, bot token, administrator access, or hardcoded T3 port is required.
 
-If T3 Code is closed during setup, the command still succeeds. The daemon starts in the background, waits quietly, and automatically connects when T3 Code and Discord Desktop become available. Open T3 Code and run `t3-discord-presence auth` later if authorization is still pending.
+After setup, the daemon:
 
-After the first run, it starts automatically when you log in, waits quietly for T3 Code, updates Discord Rich Presence when T3 is active, clears the presence when T3 closes, and reconnects whenever T3 Code or Discord Desktop returns.
+- starts when you log in;
+- waits quietly while T3 Code or Discord is closed;
+- displays privacy-safe T3 activity in Discord;
+- clears the presence when T3 closes;
+- reconnects automatically when either application returns.
 
-The generated `config.json` contains optional privacy and image settings only. For example, project names and thread titles can be hidden or shown without changing the built-in Discord application:
+If T3 is closed on the first run, open it later and run `t3-discord-presence auth` if authorization remains pending.
+
+## Commands
+
+```sh
+t3-discord-presence status
+t3-discord-presence auth
+t3-discord-presence start
+t3-discord-presence stop
+t3-discord-presence restart
+t3-discord-presence doctor
+t3-discord-presence logs
+t3-discord-presence uninstall
+```
+
+Use `t3-discord-presence run --debug` for safe foreground diagnostics. Use `uninstall --purge` to also remove known credentials, configuration, logs, and transient state.
+
+After updating the package, run it once to repair startup if the global installation path changed:
+
+```sh
+npm update -g t3-discord-presence
+t3-discord-presence
+```
+
+## Authentication and privacy
+
+The app discovers and verifies T3 Code's local runtime, uses T3's supported pairing flow, and requests only `orchestration:read`. The resulting credential is saved in the operating-system credential store when available, with a current-user-only file fallback. Pairing tokens and WebSocket tickets are never persisted.
+
+Discord receives only selected project, model, provider, elapsed-time, and coarse activity fields. Thread titles are hidden by default. Raw prompts, messages, commands, terminal output, file contents, patches, absolute paths, RPC payloads, and credentials are never published.
+
+Optional visibility settings live in the generated `config.json`:
 
 ```json
 {
@@ -43,107 +74,29 @@ The generated `config.json` contains optional privacy and image settings only. F
 }
 ```
 
-## Authentication
+## Startup support
 
-To authorize explicitly, open T3 Code and run:
+- **Windows:** current-user Task Scheduler, with a per-user Startup-folder fallback.
+- **macOS:** a user LaunchAgent. You may need to allow it under Login Items.
+- **Linux:** a systemd user service, with an XDG autostart fallback.
 
-```sh
-t3-discord-presence auth
-```
-
-The command asks the official local T3 CLI for a short-lived pairing credential, preferring the verified T3 Desktop installation and falling back to a supported global CLI. It exchanges that credential with the verified local T3 server and requests only the `orchestration:read` scope. The resulting access credential is stored per T3 environment in the operating-system credential store when available. A current-user-only app state file is used as a restrictive fallback.
-
-If automatic pairing is unavailable, `auth` can prompt in an interactive terminal for the `Token` produced by `t3 pair --label "t3 discord presence"`. Input is hidden. That one-time pairing value is exchanged immediately and is never persisted; only the scoped bearer credential is stored. The login daemon never prompts for input.
-
-Pairing credentials and WebSocket tickets are short-lived and are not persisted. Access credentials are never printed, logged, or sent to Discord. When a credential expires or is rejected, run `auth` again.
-
-## Daily use
-
-The login daemon should require no attention. These commands are available when needed:
-
-```sh
-t3-discord-presence status
-t3-discord-presence start
-t3-discord-presence stop
-t3-discord-presence restart
-t3-discord-presence doctor
-t3-discord-presence logs
-```
-
-`status` reports startup registration, daemon, T3, Discord, and authorization state without revealing secrets. `doctor` checks the local prerequisites and explains common setup failures. `logs` prints the path to the bounded, rotated JSONL daemon log.
-
-Running in the foreground is useful while diagnosing a changing T3 protocol:
-
-```sh
-t3-discord-presence run --debug
-```
-
-Debug logging includes safe event classifications and connection state, not raw payloads or private content.
-
-## Background startup
-
-- **Windows:** installs a current-user Task Scheduler task triggered at logon. It launches the exact Node executable and installed CLI through a hidden launcher. If Task Scheduler registration is unavailable, it falls back to a launcher in the current user's Startup folder.
-- **macOS:** installs `~/Library/LaunchAgents/com.f3tchcodes.t3-discord-presence.plist` and loads it with modern `launchctl` user-domain commands. Recent macOS versions may show it under Login Items / Allow in the Background; allow it there if macOS disables it.
-- **Linux:** installs and enables a `systemd --user` service. If a user systemd manager is unavailable, it falls back to an XDG autostart desktop entry.
-
-All mechanisms run the actual globally installed Node executable and compiled entry point rather than relying on an interactive shell's `PATH`.
-
-After updating the global package, run the command again so it can repair a registration whose installed path changed:
-
-```sh
-npm update -g t3-discord-presence
-t3-discord-presence
-```
-
-## Privacy
-
-The default Discord activity can include the project name, model, provider, elapsed time, a coarse activity label, and a deterministic active-agent count. Thread titles are hidden by default. Set any of the five `presence` options in the config example to `false` to hide that field; in particular, set `showProject` to `false` to hide project names.
-
-The daemon never persists or publishes to Discord:
-
-- raw prompts, chat messages, or response text;
-- raw commands, terminal output, or tool arguments;
-- file contents, patches, or diffs;
-- workspace roots, current working directories, or other absolute paths;
-- full T3 activities, thread objects, or raw RPC payloads.
-
-Activities are mapped to a small allowlist such as `editing code`, `thinking`, `running commands`, or `waiting for input`; unknown activities become a generic label. Authentication secrets are the one intentional private value retained for reconnects: access credentials are kept in the OS credential store or restricted fallback file, but never included in presence, status output, or logs. Logs are size-bounded, rotated, and redact secret-shaped values and sensitive metadata.
-
-There is no screen capture, process-memory inspection, T3 database scraping, or intermediary service operated by this project. Network communication is limited to T3's authenticated loopback backend and the local Discord RPC client; Discord itself receives only the filtered presence fields described above.
-
-## Uninstall
-
-Stop the daemon and remove only this application's startup registration:
-
-```sh
-t3-discord-presence uninstall
-```
-
-Normal uninstall preserves this app's config and stored authorization so reinstalling does not require setup again. To also remove this app's config, credentials, logs, and transient state, use:
-
-```sh
-t3-discord-presence uninstall --purge
-```
-
-Neither form removes or changes T3 Code data. `--purge` applies only to `t3-discord-presence` files and credentials. It removes fallback-file credentials plus operating-system credential entries for currently known T3 environments. Because operating-system keyrings do not provide a portable way to enumerate a service's historical entries, an entry for an old environment that is no longer present in app state or discoverable may need to be removed through the OS credential manager.
+These mechanisms require no root or administrator privileges and run without leaving a terminal window open.
 
 ## Troubleshooting
 
-Start with:
-
 ```sh
 t3-discord-presence status
 t3-discord-presence doctor
 t3-discord-presence logs
 ```
 
-- **Discord is waiting or disconnected:** start Discord Desktop and sign in. The daemon retries automatically. Optional invalid image keys are retried without images, so they cannot prevent presence updates.
-- **T3 is waiting:** open T3 Code. Stale runtime files and servers whose PID, origin, or environment descriptor cannot be verified are deliberately ignored. For a nonstandard development installation, set `T3CODE_HOME` to the relevant T3 base directory before starting the daemon.
-- **Authorization is required:** ensure T3 Code is open, then run `t3-discord-presence auth`. It checks T3 Desktop's bundled CLI and then a supported global `t3` command automatically. If neither can pair automatically, run `t3 pair --label "t3 discord presence"` and paste its `Token` into the hidden prompt. Run `restart` afterward if the daemon does not reconnect immediately.
-- **Presence looks stale:** `restart` safely replaces the one daemon instance and republishes current state. Rapid T3 events are deliberately debounced.
-- **Startup does not run after login:** rerun `t3-discord-presence`, inspect `doctor`, and check the platform-specific login mechanism described above. On macOS, also check Allow in the Background.
+- If Discord is waiting, start and sign in to Discord Desktop. Browser Discord does not support local Rich Presence.
+- If T3 is waiting, open T3 Code. Closed applications are treated as normal and retried automatically.
+- If authorization is required, open T3 Code and run `t3-discord-presence auth`.
+- If the presence looks stale, run `t3-discord-presence restart`.
+- If startup stops working after an update, rerun `t3-discord-presence`.
 
-Do not post the contents of credential files when opening an issue. Status and redacted logs are the appropriate diagnostics.
+Do not share credential files when reporting an issue; use status output and the redacted logs.
 
 ## Development
 
@@ -151,25 +104,10 @@ Do not post the contents of credential files when opening an issue. Status and r
 npm ci
 npm run check
 npm run build
-npm run dev
 ```
 
-`npm run check` runs ESLint, TypeScript type checking, and the unit test suite. Unit tests use mocks and pure startup renderers; they do not install login services or require T3 Code or Discord.
-
-Read-only integration tests are explicitly gated because they connect to a real local T3 environment. They never send agent commands or modify projects or threads. On macOS/Linux:
-
-```sh
-T3_DISCORD_PRESENCE_INTEGRATION=1 npm run test:integration
-```
-
-In PowerShell:
-
-```powershell
-$env:T3_DISCORD_PRESENCE_INTEGRATION="1"; npm run test:integration
-```
-
-Normal CI runs only `npm ci`, `npm run check`, and `npm run build`; it needs neither T3 Code nor Discord and does not publish packages.
+Unit tests never modify the machine's real startup configuration. Live read-only integration tests are opt-in with `T3_DISCORD_PRESENCE_INTEGRATION=1 npm run test:integration` (set the environment variable using PowerShell syntax on Windows).
 
 ## License
 
-MIT
+[MIT](LICENSE)
