@@ -183,8 +183,10 @@ export class DiscordConnectionManager {
                         }
                         firstPublish = false;
 
-                        if (publishedKey !== this.#desiredKey) {
-                            if (this.#desired === null) {
+                        const desiredKey = this.#desiredKey;
+                        const desired = this.#desired === null ? null : { ...this.#desired };
+                        if (publishedKey !== desiredKey) {
+                            if (desired === null) {
                                 if (activityPublished) {
                                     await withTimeout(
                                         client.clearActivity(),
@@ -195,11 +197,11 @@ export class DiscordConnectionManager {
                             } else {
                                 try {
                                     await withTimeout(
-                                        client.setActivity(this.#desired),
+                                        client.setActivity(desired),
                                         this.#options.operationTimeoutMs,
                                     );
                                 } catch (error) {
-                                    const fallback = withoutOptionalAssets(this.#desired);
+                                    const fallback = withoutOptionalAssets(desired);
                                     if (fallback === undefined) throw error;
                                     this.#options.onError?.(error);
                                     await withTimeout(
@@ -209,7 +211,7 @@ export class DiscordConnectionManager {
                                 }
                                 activityPublished = true;
                             }
-                            publishedKey = this.#desiredKey;
+                            publishedKey = desiredKey;
                         }
                         await this.#waitForWake(revision, signal, () => disconnected);
                     }

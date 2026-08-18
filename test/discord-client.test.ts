@@ -44,6 +44,60 @@ class FakeDiscordClient implements DiscordPresenceClient {
     }
 }
 
+class SlowFirstPublishClient extends FakeDiscordClient {
+    readonly firstPublishStarted: Promise<void>;
+    #releaseFirstPublish: (() => void) | undefined;
+    #resolveFirstPublishStarted: (() => void) | undefined;
+
+    constructor() {
+        super();
+        this.firstPublishStarted = new Promise(resolve => {
+            this.#resolveFirstPublishStarted = resolve;
+        });
+    }
+
+    override async setActivity(activity: DiscordActivity): Promise<void> {
+        if (this.activities.length === 0) {
+            this.#resolveFirstPublishStarted?.();
+            await new Promise<void>(resolve => {
+                this.#releaseFirstPublish = resolve;
+            });
+        }
+        await super.setActivity(activity);
+    }
+
+    release(): void {
+        this.#releaseFirstPublish?.();
+    }
+}
+
+class SlowFirstClearClient extends FakeDiscordClient {
+    readonly firstClearStarted: Promise<void>;
+    #releaseFirstClear: (() => void) | undefined;
+    #resolveFirstClearStarted: (() => void) | undefined;
+
+    constructor() {
+        super();
+        this.firstClearStarted = new Promise(resolve => {
+            this.#resolveFirstClearStarted = resolve;
+        });
+    }
+
+    override async clearActivity(): Promise<void> {
+        if (this.clearCount === 0) {
+            this.#resolveFirstClearStarted?.();
+            await new Promise<void>(resolve => {
+                this.#releaseFirstClear = resolve;
+            });
+        }
+        await super.clearActivity();
+    }
+
+    release(): void {
+        this.#releaseFirstClear?.();
+    }
+}
+
 async function until(check: () => boolean): Promise<void> {
     for (let attempt = 0; attempt < 100; attempt += 1) {
         if (check()) return;
@@ -106,6 +160,70 @@ describe("DiscordConnectionManager", () => {
         expect(first.destroyCount).toBe(1);
         expect(second.destroyCount).toBe(1);
         expect(second.clearCount).toBe(1);
+    });
+
+    it("publishes a newer activity that arrives while an update is in flight", async () => {
+        const client = new SlowFirstPublishClient();
+        const controller = new AbortController();
+        const manager = new DiscordConnectionManager({
+            clientId: "123",
+            createClient: () => client,
+            debounceMs: 0,
+        });
+        manager.setDesiredActivity({ details: "first", state: "thinking" });
+        const running = manager.run(controller.signal);
+
+        await client.firstPublishStarted;
+        manager.setDesiredActivity({ details: "second", state: "editing code" });
+        client.release();
+        await until(() => client.activities.length === 2);
+
+        expect(client.activities.map(activity => activity.details)).toEqual(["first", "second"]);
+        controller.abort();
+        await running;
+    });
+
+    it("clears activity when T3 disappears during an in-flight publish", async () => {
+        const client = new SlowFirstPublishClient();
+        const controller = new AbortController();
+        const manager = new DiscordConnectionManager({
+            clientId: "123",
+            createClient: () => client,
+            debounceMs: 0,
+        });
+        manager.setDesiredActivity({ details: "private project", state: "thinking" });
+        const running = manager.run(controller.signal);
+
+        await client.firstPublishStarted;
+        manager.setDesiredActivity(null);
+        client.release();
+        await until(() => client.clearCount === 1);
+
+        controller.abort();
+        await running;
+    });
+
+    it("publishes activity that arrives during an in-flight clear", async () => {
+        const client = new SlowFirstClearClient();
+        const controller = new AbortController();
+        const manager = new DiscordConnectionManager({
+            clientId: "123",
+            createClient: () => client,
+            debounceMs: 0,
+        });
+        manager.setDesiredActivity({ details: "first", state: "thinking" });
+        const running = manager.run(controller.signal);
+        await until(() => client.activities.length === 1);
+
+        manager.setDesiredActivity(null);
+        await client.firstClearStarted;
+        manager.setDesiredActivity({ details: "second", state: "editing code" });
+        client.release();
+        await until(() => client.activities.length === 2);
+
+        expect(client.activities.at(-1)?.details).toBe("second");
+        controller.abort();
+        await running;
     });
 
     it("waits and retries when Discord is unavailable", async () => {
