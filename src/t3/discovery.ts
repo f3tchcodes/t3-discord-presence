@@ -121,11 +121,20 @@ export function parseEnvironmentDescriptor(value: unknown): T3EnvironmentDescrip
     };
 }
 
+export function isLoopbackHostname(hostname: string): boolean {
+    if (hostname === "localhost" || hostname === "[::1]") return true;
+    const octets = hostname.split(".");
+    return octets.length === 4
+        && octets[0] === "127"
+        && octets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
 export function isRuntimeOriginValid(runtime: T3RuntimeState): boolean {
     try {
         const url = new URL(runtime.origin);
         if (
             (url.protocol !== "http:" && url.protocol !== "https:")
+            || !isLoopbackHostname(url.hostname)
             || url.username.length > 0
             || url.password.length > 0
             || url.pathname !== "/"

@@ -6,6 +6,7 @@ import {
     type StoredCredential,
 } from "../config/credentials.js";
 import { resolveT3CliCommand } from "./cli.js";
+import { isLoopbackHostname } from "./discovery.js";
 import type { DiscoveredT3Server } from "./types.js";
 
 export const AUTH_CLIENT_LABEL = "t3 discord presence";
@@ -113,6 +114,7 @@ function authEndpoint(origin: string, path: string): URL {
         const base = new URL(origin);
         if (
             (base.protocol !== "http:" && base.protocol !== "https:")
+            || !isLoopbackHostname(base.hostname)
             || base.username.length > 0
             || base.password.length > 0
         ) {
@@ -277,15 +279,6 @@ export function parsePairingJsonOutput(output: string, now = Date.now()): string
     return value.credential;
 }
 
-export function parsePairTokenOutput(output: string): string {
-    const tokens = [...output.matchAll(/^Token:[ \t]+([^\s]+)[ \t]*\r?$/gm)];
-    const token = tokens.length === 1 ? tokens[0]?.[1] : undefined;
-    if (!validSecret(token)) {
-        throw new T3AuthError("T3 CLI did not return one valid Token line", "pairing-failed");
-    }
-    return token;
-}
-
 export async function mintPairingCredential(
     server: DiscoveredT3Server,
     options: PairingOptions = {},
@@ -299,9 +292,22 @@ export async function mintPairingCredential(
         ...(options.env ?? process.env),
         T3CODE_HOME: server.baseDir,
     };
-    const pairingArguments = server.variant === "userdata"
-        ? ["auth", "pairing", "create", "--json", "--label", label]
-        : ["pair", "--base-dir", server.baseDir, "--label", label];
+    const pairingArguments = [
+        "auth",
+        "pairing",
+        "create",
+        "--json",
+        ...(server.variant === "dev"
+            ? [
+                "--base-dir",
+                server.baseDir,
+                "--dev-url",
+                server.runtime.devUrl ?? server.runtime.origin,
+            ]
+            : []),
+        "--label",
+        label,
+    ];
     let command: {
         readonly executable: string;
         readonly argumentsPrefix: ReadonlyArray<string>;
@@ -342,9 +348,7 @@ export async function mintPairingCredential(
     if (result.exitCode !== 0) {
         throw new T3AuthError("T3 CLI pairing failed", "pairing-failed");
     }
-    return server.variant === "userdata"
-        ? parsePairingJsonOutput(result.stdout, (options.now ?? Date.now)())
-        : parsePairTokenOutput(result.stdout);
+    return parsePairingJsonOutput(result.stdout, (options.now ?? Date.now)());
 }
 
 export async function exchangePairingCredential(
@@ -365,10 +369,11 @@ export async function exchangePairingCredential(
         client_device_type: AUTH_CLIENT_DEVICE_TYPE,
         client_os: options.clientOs ?? process.platform,
     });
+    const endpoint = authEndpoint(server.runtime.origin, TOKEN_PATH);
     let response: Response;
     try {
         response = await (options.fetch ?? globalThis.fetch)(
-            authEndpoint(server.runtime.origin, TOKEN_PATH),
+            endpoint,
             {
                 method: "POST",
                 headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -434,10 +439,11 @@ export async function requestWebSocketTicket(
     if (!validSecret(accessToken)) {
         throw new T3AuthError("bearer credential is invalid", "invalid-input");
     }
+    const endpoint = authEndpoint(server.runtime.origin, WEBSOCKET_TICKET_PATH);
     let response: Response;
     try {
         response = await (options.fetch ?? globalThis.fetch)(
-            authEndpoint(server.runtime.origin, WEBSOCKET_TICKET_PATH),
+            endpoint,
             {
                 method: "POST",
                 headers: { authorization: `Bearer ${accessToken}` },

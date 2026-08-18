@@ -98,11 +98,34 @@ describe("t3 runtime discovery", () => {
         expect(probed).toBe(false);
     });
 
-    it("rejects runtime origins with mismatched ports or paths", () => {
+    it("accepts only canonical loopback origins with matching ports", () => {
         expect(isRuntimeOriginValid(runtime())).toBe(true);
+        expect(isRuntimeOriginValid(runtime({ origin: "http://localhost:41773" }))).toBe(true);
+        expect(isRuntimeOriginValid(runtime({ origin: "http://127.255.255.254:41773" })))
+            .toBe(true);
+        expect(isRuntimeOriginValid(runtime({ origin: "http://[::1]:41773" }))).toBe(true);
         expect(isRuntimeOriginValid(runtime({ origin: "http://127.0.0.1:1234" }))).toBe(false);
         expect(isRuntimeOriginValid(runtime({ origin: "http://127.0.0.1:41773/not-t3" }))).toBe(false);
         expect(isRuntimeOriginValid(runtime({ origin: "file:///tmp/t3", port: 80 }))).toBe(false);
+        expect(isRuntimeOriginValid(runtime({ origin: "http://0.0.0.0:41773" }))).toBe(false);
+        expect(isRuntimeOriginValid(runtime({ origin: "http://192.168.1.20:41773" }))).toBe(false);
+        expect(isRuntimeOriginValid(runtime({ origin: "https://example.test:41773" }))).toBe(false);
+    });
+
+    it("rejects a non-loopback runtime before making a descriptor request", async () => {
+        const baseDir = temp.path("remote-origin");
+        await writeRuntime(baseDir, runtime({ origin: "http://192.168.1.20:41773" }));
+        let probed = false;
+
+        await expect(discoverT3Server({
+            baseDirs: [baseDir],
+            isPidAlive: () => true,
+            fetch: async () => {
+                probed = true;
+                return Response.json(descriptor);
+            },
+        })).resolves.toBeUndefined();
+        expect(probed).toBe(false);
     });
 
     it("rejects a non-T3 HTTP service", async () => {

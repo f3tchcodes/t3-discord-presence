@@ -11,7 +11,6 @@ import {
     exchangePairingCredential,
     isAuthorizationRejected,
     mintPairingCredential,
-    parsePairTokenOutput,
     type ProcessAdapter,
     requestWebSocketAuthorization,
     requestWebSocketTicket,
@@ -231,9 +230,25 @@ describe("T3 HTTP authentication", () => {
             .not.toContain(bearer);
     });
 
-    it("builds secure WebSocket URLs for HTTPS origins", () => {
-        expect(buildWebSocketUrl("https://example.test:443", "ticket/value"))
-            .toBe("wss://example.test/ws?wsTicket=ticket%2Fvalue");
+    it("rejects a non-loopback origin before sending a pairing credential", async () => {
+        let requested = false;
+
+        await expect(exchangePairingCredential(
+            target("https://example.test:443"),
+            "pairing-secret-that-must-stay-local",
+            {
+                fetch: async () => {
+                    requested = true;
+                    return Response.json({});
+                },
+            },
+        )).rejects.toMatchObject({ code: "invalid-input" });
+        expect(requested).toBe(false);
+    });
+
+    it("builds secure WebSocket URLs for HTTPS loopback origins", () => {
+        expect(buildWebSocketUrl("https://[::1]:4443", "ticket/value"))
+            .toBe("wss://[::1]:4443/ws?wsTicket=ticket%2Fvalue");
     });
 });
 
@@ -323,18 +338,21 @@ describe("official T3 CLI pairing", () => {
         }]);
     });
 
-    it("uses discovery-aware t3 pair for dev and only parses an anchored Token line", async () => {
-        let arguments_: ReadonlyArray<string> = [];
+    it("uses JSON pairing with the exact discovered dev location", async () => {
+        let call: {
+            readonly arguments_: ReadonlyArray<string>;
+            readonly env: NodeJS.ProcessEnv;
+        } | undefined;
         const processAdapter: ProcessAdapter = {
-            async run(_executable, suppliedArguments) {
-                arguments_ = suppliedArguments;
+            async run(_executable, arguments_, options) {
+                call = { arguments_, env: options.env };
                 return {
                     exitCode: 0,
-                    stdout: [
-                        "Pairing URL: http://127.0.0.1/pair#token=decoy",
-                        "Token: dev-pairing-token",
-                        "Expires: 2026-08-18T10:05:00.000Z",
-                    ].join("\n"),
+                    stdout: JSON.stringify({
+                        credential: "dev-pairing-token",
+                        scopes: ["orchestration:read"],
+                        expiresAt: "2026-08-18T10:05:00.000Z",
+                    }),
                     stderr: "",
                 };
             },
@@ -342,19 +360,68 @@ describe("official T3 CLI pairing", () => {
 
         await expect(mintPairingCredential(
             target("http://127.0.0.1:41773", "dev"),
-            { process: processAdapter },
+            {
+                process: processAdapter,
+                env: { PATH: "test-path", T3CODE_HOME: "wrong-home" },
+                now: () => NOW,
+            },
+        )).resolves.toBe("dev-pairing-token");
+        expect(call).toEqual({
+            arguments_: [
+                "auth",
+                "pairing",
+                "create",
+                "--json",
+                "--base-dir",
+                "C:\\T3 Home",
+                "--dev-url",
+                "http://127.0.0.1:5173",
+                "--label",
+                "t3 discord presence",
+            ],
+            env: {
+                PATH: "test-path",
+                T3CODE_HOME: "C:\\T3 Home",
+            },
+        });
+    });
+
+    it("uses the verified runtime origin when a dev runtime omits devUrl", async () => {
+        let arguments_: ReadonlyArray<string> = [];
+        const processAdapter: ProcessAdapter = {
+            async run(_executable, suppliedArguments) {
+                arguments_ = suppliedArguments;
+                return {
+                    exitCode: 0,
+                    stdout: JSON.stringify({
+                        credential: "dev-pairing-token",
+                        scopes: ["orchestration:read"],
+                        expiresAt: "2026-08-18T10:05:00.000Z",
+                    }),
+                    stderr: "",
+                };
+            },
+        };
+        const discovered = target("http://127.0.0.1:41773", "dev");
+        const { devUrl, ...runtime } = discovered.runtime;
+        expect(devUrl).toBe("http://127.0.0.1:5173");
+
+        await expect(mintPairingCredential(
+            { ...discovered, runtime },
+            { process: processAdapter, now: () => NOW },
         )).resolves.toBe("dev-pairing-token");
         expect(arguments_).toEqual([
-            "pair",
+            "auth",
+            "pairing",
+            "create",
+            "--json",
             "--base-dir",
             "C:\\T3 Home",
+            "--dev-url",
+            "http://127.0.0.1:41773",
             "--label",
             "t3 discord presence",
         ]);
-        expect(() => parsePairTokenOutput("prefix Token: inline-secret"))
-            .toThrow("one valid Token line");
-        expect(() => parsePairTokenOutput("Token: first\nToken: second"))
-            .toThrow("one valid Token line");
     });
 
     it("never carries captured T3 CLI output into an error", async () => {

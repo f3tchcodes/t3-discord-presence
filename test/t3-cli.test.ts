@@ -26,7 +26,7 @@ function fileSystem(files: ReadonlyArray<string>, links: Readonly<Record<string,
 }
 
 describe("T3 CLI resolution", () => {
-    it("prefers a verified t3 command on PATH without inspecting Desktop files", async () => {
+    it("falls back to a verified t3 command on PATH after inspecting Desktop files", async () => {
         const calls: Array<{ readonly executable: string; readonly arguments_: ReadonlyArray<string> }> = [];
         const processAdapter: T3CliProcessAdapter = {
             async run(executable, arguments_) {
@@ -37,11 +37,47 @@ describe("T3 CLI resolution", () => {
         const files = fileSystem([]);
 
         await expect(resolveT3CliCommand({
+            platform: "linux",
+            env: {},
+            homeDir: "/home/ada",
+            currentExecutable: "/usr/bin/node",
             process: processAdapter,
             fileSystem: files.adapter,
         })).resolves.toEqual({ executable: "t3", argumentsPrefix: [] });
         expect(calls).toEqual([{ executable: "t3", arguments_: ["--version"] }]);
-        expect(files.checked).toEqual([]);
+        expect(files.checked.length).toBeGreaterThan(0);
+    });
+
+    it("prefers a working Desktop bundle when PATH contains a stale T3 CLI", async () => {
+        const bundled = "/desktop/resources/app.asar.unpacked/apps/server/dist/bin.mjs";
+        const files = fileSystem([bundled]);
+        const calls: Array<{ readonly executable: string; readonly arguments_: ReadonlyArray<string> }> = [];
+        const processAdapter: T3CliProcessAdapter = {
+            async run(executable, arguments_) {
+                calls.push({ executable, arguments_ });
+                return executable === "t3"
+                    ? { exitCode: 0, stdout: "t3 v0.0.1", stderr: "" }
+                    : { exitCode: 0, stdout: "t3 v0.0.33", stderr: "" };
+            },
+        };
+
+        await expect(resolveT3CliCommand({
+            platform: "linux",
+            env: { PATH: "/stale/bin" },
+            homeDir: "/home/ada",
+            currentExecutable: "/usr/bin/node",
+            nodeExecutable: "/usr/bin/node",
+            resourceDirectories: ["/desktop/resources"],
+            process: processAdapter,
+            fileSystem: files.adapter,
+        })).resolves.toEqual({
+            executable: "/usr/bin/node",
+            argumentsPrefix: [bundled],
+        });
+        expect(calls).toEqual([{
+            executable: "/usr/bin/node",
+            arguments_: [bundled, "--version"],
+        }]);
     });
 
     it("uses a bundled Windows CLI with spaced paths as discrete arguments", async () => {
@@ -76,6 +112,62 @@ describe("T3 CLI resolution", () => {
             arguments_: [bundled, "--version"],
         });
         expect(calls.at(-1)?.arguments_[0]).not.toContain('"');
+    });
+
+    it("resolves a standard Windows npm shim to its absolute JavaScript entrypoint", async () => {
+        const npmDirectory = "C:\\Users\\Ada Lovelace\\AppData\\Roaming\\npm";
+        const shim = `${npmDirectory}\\t3.cmd`;
+        const cliEntrypoint = `${npmDirectory}\\node_modules\\t3\\dist\\bin.mjs`;
+        const nodeExecutable = "C:\\Program Files\\nodejs\\node.exe";
+        const files = fileSystem([shim, cliEntrypoint]);
+        const calls: Array<{ readonly executable: string; readonly arguments_: ReadonlyArray<string> }> = [];
+        const processAdapter: T3CliProcessAdapter = {
+            async run(executable, arguments_) {
+                calls.push({ executable, arguments_ });
+                return { exitCode: 0, stdout: "t3 v0.0.33", stderr: "" };
+            },
+        };
+
+        await expect(resolveT3CliCommand({
+            platform: "win32",
+            env: { Path: `"${npmDirectory}";relative\\bin` },
+            homeDir: "C:\\Users\\Ada Lovelace",
+            currentExecutable: nodeExecutable,
+            nodeExecutable,
+            process: processAdapter,
+            fileSystem: files.adapter,
+        })).resolves.toEqual({
+            executable: nodeExecutable,
+            argumentsPrefix: [cliEntrypoint],
+        });
+        expect(calls).toEqual([{
+            executable: nodeExecutable,
+            arguments_: [cliEntrypoint, "--version"],
+        }]);
+        expect(calls.some(call => /(?:cmd(?:\.exe)?|t3\.cmd)$/i.test(call.executable))).toBe(false);
+    });
+
+    it("never executes a Windows npm command shim without its standard module entrypoint", async () => {
+        const npmDirectory = "C:\\Users\\Ada\\AppData\\Roaming\\npm";
+        const shim = `${npmDirectory}\\t3.cmd`;
+        const files = fileSystem([shim]);
+        const calls: Array<{ readonly executable: string; readonly arguments_: ReadonlyArray<string> }> = [];
+        const processAdapter: T3CliProcessAdapter = {
+            async run(executable, arguments_) {
+                calls.push({ executable, arguments_ });
+                return { exitCode: 0, stdout: "t3 v0.0.33", stderr: "" };
+            },
+        };
+
+        await expect(resolveT3CliCommand({
+            platform: "win32",
+            env: { PATH: npmDirectory },
+            homeDir: "C:\\Users\\Ada",
+            currentExecutable: "C:\\Program Files\\nodejs\\node.exe",
+            process: processAdapter,
+            fileSystem: files.adapter,
+        })).resolves.toBeUndefined();
+        expect(calls).toEqual([]);
     });
 
     it.each([

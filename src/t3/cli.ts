@@ -10,6 +10,7 @@ const BUNDLED_CLI_PARTS = [
     "dist",
     "bin.mjs",
 ] as const;
+const NPM_GLOBAL_CLI_PARTS = ["node_modules", "t3", "dist", "bin.mjs"] as const;
 const DEFAULT_PROBE_TIMEOUT_MS = 3_000;
 const MAX_PROBE_OUTPUT_BYTES = 16 * 1024;
 const VERSION_PATTERN = /^(?:t3\s+)?v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/i;
@@ -237,6 +238,44 @@ function uniqueAbsoluteDirectories(
     return result;
 }
 
+function windowsPathDirectories(environment: NodeJS.ProcessEnv): ReadonlyArray<string> {
+    const pathValue = environmentValue(environment, "PATH", "win32");
+    if (pathValue === undefined) return [];
+    return uniqueAbsoluteDirectories(pathValue.split(";").map(entry => {
+        const trimmed = entry.trim();
+        return trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2
+            ? trimmed.slice(1, -1)
+            : trimmed;
+    }), "win32");
+}
+
+async function resolveWindowsNpmCommand(
+    environment: NodeJS.ProcessEnv,
+    nodeExecutable: string,
+    fileSystem: T3CliFileSystemAdapter,
+    processAdapter: T3CliProcessAdapter,
+    signal: AbortSignal | undefined,
+    timeoutMs: number,
+): Promise<T3CliCommand | undefined> {
+    for (const directory of windowsPathDirectories(environment)) {
+        const shim = win32.join(directory, "t3.cmd");
+        if (!await fileSystem.isFile(shim)) continue;
+        const bundledCli = win32.join(directory, ...NPM_GLOBAL_CLI_PARTS);
+        if (!win32.isAbsolute(bundledCli) || !await fileSystem.isFile(bundledCli)) continue;
+        const command = {
+            executable: nodeExecutable,
+            argumentsPrefix: [bundledCli],
+        } satisfies T3CliCommand;
+        if (await probeCommand(
+            command,
+            processAdapter,
+            environment,
+            combineSignal(signal, timeoutMs),
+        )) return command;
+    }
+    return undefined;
+}
+
 async function runtimeExecutablePath(
     pid: number | undefined,
     platform: NodeJS.Platform,
@@ -283,14 +322,6 @@ export async function resolveT3CliCommand(
     const processAdapter = options.process ?? nodeT3CliProcessAdapter;
     const fileSystem = options.fileSystem ?? nodeT3CliFileSystemAdapter;
     const timeoutMs = options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
-    const pathCommand = { executable: "t3", argumentsPrefix: [] } satisfies T3CliCommand;
-    if (await probeCommand(
-        pathCommand,
-        processAdapter,
-        environment,
-        combineSignal(options.signal, timeoutMs),
-    )) return pathCommand;
-
     const runtimeExecutable = await runtimeExecutablePath(
         options.runtimePid,
         platform,
@@ -325,5 +356,23 @@ export async function resolveT3CliCommand(
             combineSignal(options.signal, timeoutMs),
         )) return command;
     }
+
+    if (platform === "win32") {
+        return await resolveWindowsNpmCommand(
+            environment,
+            nodeExecutable,
+            fileSystem,
+            processAdapter,
+            options.signal,
+            timeoutMs,
+        );
+    }
+    const pathCommand = { executable: "t3", argumentsPrefix: [] } satisfies T3CliCommand;
+    if (await probeCommand(
+        pathCommand,
+        processAdapter,
+        environment,
+        combineSignal(options.signal, timeoutMs),
+    )) return pathCommand;
     return undefined;
 }
