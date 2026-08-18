@@ -98,6 +98,23 @@ class SlowFirstClearClient extends FakeDiscordClient {
     }
 }
 
+class HangingPublishClient extends FakeDiscordClient {
+    readonly publishStarted: Promise<void>;
+    #resolvePublishStarted: (() => void) | undefined;
+
+    constructor() {
+        super();
+        this.publishStarted = new Promise(resolve => {
+            this.#resolvePublishStarted = resolve;
+        });
+    }
+
+    override async setActivity(): Promise<void> {
+        this.#resolvePublishStarted?.();
+        await new Promise<void>(() => undefined);
+    }
+}
+
 async function until(check: () => boolean): Promise<void> {
     for (let attempt = 0; attempt < 100; attempt += 1) {
         if (check()) return;
@@ -299,6 +316,26 @@ describe("DiscordConnectionManager", () => {
         await expect(manager.run(controller.signal)).rejects.toThrow("already running");
         controller.abort();
         await running;
+    });
+
+    it("aborts a stuck publish and performs bounded shutdown cleanup", async () => {
+        const client = new HangingPublishClient();
+        const controller = new AbortController();
+        const manager = new DiscordConnectionManager({
+            clientId: "123",
+            createClient: () => client,
+            debounceMs: 0,
+            operationTimeoutMs: 60_000,
+            cleanupTimeoutMs: 10,
+        });
+        manager.setDesiredActivity({ details: "private project", state: "thinking" });
+        const running = manager.run(controller.signal);
+
+        await client.publishStarted;
+        controller.abort();
+        await expect(running).resolves.toBeUndefined();
+        expect(client.clearCount).toBe(1);
+        expect(client.destroyCount).toBe(1);
     });
 });
 

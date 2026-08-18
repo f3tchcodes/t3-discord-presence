@@ -12,6 +12,7 @@ export interface DiscordManagerOptions {
     readonly createClient?: (clientId: string) => DiscordPresenceClient;
     readonly debounceMs?: number;
     readonly operationTimeoutMs?: number;
+    readonly cleanupTimeoutMs?: number;
     readonly retryBaseMs?: number;
     readonly retryMaxMs?: number;
     readonly random?: () => number;
@@ -72,15 +73,27 @@ function waitForDelay(milliseconds: number, signal: AbortSignal): Promise<void> 
     });
 }
 
-async function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+async function withTimeout<T>(
+    promise: Promise<T>,
+    milliseconds: number,
+    signal?: AbortSignal,
+): Promise<T> {
+    if (signal?.aborted === true) throw abortError();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error("Discord RPC operation timed out")), milliseconds);
     });
+    const aborted = new Promise<never>((_resolve, reject) => {
+        if (signal === undefined) return;
+        onAbort = () => reject(abortError());
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
     try {
-        return await Promise.race([promise, timeout]);
+        return await Promise.race([promise, timeout, aborted]);
     } finally {
         if (timer !== undefined) clearTimeout(timer);
+        if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
     }
 }
 
@@ -117,7 +130,12 @@ function withoutOptionalAssets(activity: DiscordActivity): DiscordActivity | und
 export class DiscordConnectionManager {
     readonly #options: Required<Pick<
         DiscordManagerOptions,
-        "debounceMs" | "operationTimeoutMs" | "retryBaseMs" | "retryMaxMs" | "random"
+        | "debounceMs"
+        | "operationTimeoutMs"
+        | "cleanupTimeoutMs"
+        | "retryBaseMs"
+        | "retryMaxMs"
+        | "random"
     >> & DiscordManagerOptions;
     #desired: DiscordActivity | null = null;
     #desiredKey = discordActivitySemanticKey(null);
@@ -133,6 +151,7 @@ export class DiscordConnectionManager {
             ...options,
             debounceMs: options.debounceMs ?? 500,
             operationTimeoutMs: options.operationTimeoutMs ?? 15_000,
+            cleanupTimeoutMs: options.cleanupTimeoutMs ?? 5_000,
             retryBaseMs: options.retryBaseMs ?? 1_000,
             retryMaxMs: options.retryMaxMs ?? 30_000,
             random: options.random ?? Math.random,
@@ -167,7 +186,11 @@ export class DiscordConnectionManager {
                 });
                 try {
                     this.#setState("connecting");
-                    await withTimeout(client.login(), this.#options.operationTimeoutMs);
+                    await withTimeout(
+                        client.login(),
+                        this.#options.operationTimeoutMs,
+                        signal,
+                    );
                     if (signal.aborted) break;
                     connected = true;
                     attempt = 0;
@@ -191,14 +214,19 @@ export class DiscordConnectionManager {
                                     await withTimeout(
                                         client.clearActivity(),
                                         this.#options.operationTimeoutMs,
+                                        signal,
                                     );
                                 }
                                 activityPublished = false;
                             } else {
+                                // A request may have reached Discord before its promise settles.
+                                // Remember that cleanup may need to clear it even on abort/timeout.
+                                activityPublished = true;
                                 try {
                                     await withTimeout(
                                         client.setActivity(desired),
                                         this.#options.operationTimeoutMs,
+                                        signal,
                                     );
                                 } catch (error) {
                                     const fallback = withoutOptionalAssets(desired);
@@ -207,9 +235,9 @@ export class DiscordConnectionManager {
                                     await withTimeout(
                                         client.setActivity(fallback),
                                         this.#options.operationTimeoutMs,
+                                        signal,
                                     );
                                 }
-                                activityPublished = true;
                             }
                             publishedKey = desiredKey;
                         }
@@ -224,10 +252,10 @@ export class DiscordConnectionManager {
                     if (connected && activityPublished && !disconnected) {
                         await withTimeout(
                             client.clearActivity(),
-                            this.#options.operationTimeoutMs,
+                            this.#options.cleanupTimeoutMs,
                         ).catch(error => this.#options.onError?.(error));
                     }
-                    await withTimeout(client.destroy(), this.#options.operationTimeoutMs).catch(
+                    await withTimeout(client.destroy(), this.#options.cleanupTimeoutMs).catch(
                         error => this.#options.onError?.(error),
                     );
                 }
