@@ -291,7 +291,13 @@ class KeyringCredentialStore implements CredentialStore {
             return this.#fallback.get(environmentId);
         }
         if (contents === undefined) return this.#fallback.get(environmentId);
-        return parseKeyringPayload(environmentId, contents);
+        try {
+            return parseKeyringPayload(environmentId, contents);
+        } catch (error) {
+            if (!(error instanceof CredentialStoreError)) throw error;
+            // an older or damaged app-owned entry should not block reauthorization
+            return this.#fallback.get(environmentId);
+        }
     }
 
     async set(credential: StoredCredential): Promise<void> {

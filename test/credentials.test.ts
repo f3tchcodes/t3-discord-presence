@@ -125,6 +125,24 @@ describe("credential storage", () => {
         );
     });
 
+    it("repairs an invalid app-owned keyring entry on the next authorization", async () => {
+        const memory = memoryKeyring(new Map([
+            ["t3-discord-presence:environment-a", "legacy-invalid-entry"],
+        ]));
+        const store = await createCredentialStore({
+            credentialsFile: temp.path("repair", "credentials.json"),
+            keyringLoader: async () => memory.keyring,
+        });
+
+        await expect(store.get("environment-a")).resolves.toBeUndefined();
+        expect(store.mode).toBe("keyring");
+
+        await store.set(credential("environment-a", "replacement-bearer"));
+        await expect(store.get("environment-a")).resolves.toEqual(
+            credential("environment-a", "replacement-bearer"),
+        );
+    });
+
     it("deletes one environment without affecting another", async () => {
         const store = await createCredentialStore({
             credentialsFile: temp.path("credentials.json"),
