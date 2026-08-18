@@ -12,6 +12,7 @@ export interface AppPaths {
     readonly credentialsFile: string;
     readonly runtimeDirectory: string;
     readonly lockFile: string;
+    readonly stopFile: string;
     readonly statusFile: string;
     readonly logDirectory: string;
     readonly logFile: string;
@@ -67,6 +68,7 @@ function buildPaths(
         credentialsFile: join(stateDirectory, "credentials.json"),
         runtimeDirectory,
         lockFile: join(runtimeDirectory, "daemon.lock"),
+        stopFile: join(runtimeDirectory, "daemon.stop"),
         statusFile: join(runtimeDirectory, "status.json"),
         logDirectory,
         logFile: join(logDirectory, "daemon.log"),

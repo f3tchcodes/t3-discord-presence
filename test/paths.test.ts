@@ -142,6 +142,7 @@ describe("ensureAppDirectories", () => {
             credentialsFile: join(root, "state", "credentials.json"),
             runtimeDirectory: join(root, "runtime"),
             lockFile: join(root, "runtime", "daemon.lock"),
+            stopFile: join(root, "runtime", "daemon.stop"),
             statusFile: join(root, "runtime", "status.json"),
             logDirectory: join(root, "logs"),
             logFile: join(root, "logs", "daemon.log"),
