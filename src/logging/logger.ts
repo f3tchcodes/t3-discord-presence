@@ -112,9 +112,9 @@ function redactString(value: string): string {
             /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
             REDACTED,
         )
-        .replaceAll(/(?:[A-Za-z]:\\|\\\\)[^\s,;"'<>]+/g, "[path]")
+        .replaceAll(/(?:[A-Za-z]:[\\/]|\\\\|\/\/)[^,;\r\n"'<>]+/g, "[path]")
         .replaceAll(
-            /(^|[\s("'=])\/(?:Users|home|private|tmp|var\/folders|workspace|workspaces)\/[^\s,;"')<>]+/g,
+            /(^|[\s("'=])\/(?!\/)[^,;\r\n"')<>]+/g,
             "$1[path]",
         );
 }

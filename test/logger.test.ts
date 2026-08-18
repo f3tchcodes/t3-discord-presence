@@ -102,6 +102,22 @@ describe("FileLogger", () => {
         expect(contents).toContain("[circular]");
     });
 
+    it("redacts spaced Windows paths and arbitrary absolute POSIX paths", async () => {
+        const root = await temporaryDirectory();
+        const filePath = join(root, "daemon.log");
+        const logger = new FileLogger({ filePath });
+
+        await logger.warn("failed at C:\\Users\\Ada Lovelace\\Client Work\\source.ts");
+        await logger.warn("failed at /mnt/customer work/private/source.ts");
+        await logger.close();
+
+        const contents = await readFile(filePath, "utf8");
+        expect(contents).not.toContain("Ada Lovelace");
+        expect(contents).not.toContain("Client Work");
+        expect(contents).not.toContain("/mnt/customer");
+        expect(contents).toContain("[path]");
+    });
+
     it("serializes concurrent writes in call order", async () => {
         const root = await temporaryDirectory();
         const filePath = join(root, "daemon.log");
