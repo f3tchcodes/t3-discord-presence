@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - "22.x"
+          - "24.x"
+    env:
+      CI: "true"
+      T3_DISCORD_PRESENCE_INTEGRATION: "0"
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v6
+      - name: use node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - name: install dependencies
+        run: npm ci
+      - name: check source
+        run: npm run check
+      - name: build package
+        run: npm run build

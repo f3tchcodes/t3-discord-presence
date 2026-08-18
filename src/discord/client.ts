@@ -219,8 +219,8 @@ export class DiscordConnectionManager {
                                 }
                                 activityPublished = false;
                             } else {
-                                // A request may have reached Discord before its promise settles.
-                                // Remember that cleanup may need to clear it even on abort/timeout.
+                                // a request may reach discord before its promise settles
+                                // remember that cleanup may still need to clear it
                                 activityPublished = true;
                                 try {
                                     await withTimeout(

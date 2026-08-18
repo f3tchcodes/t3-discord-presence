@@ -233,7 +233,7 @@ export async function installMacosStartup(
     try {
         wasLoaded = await launchAgentIsLoaded(prepared, runCommand);
     } catch {
-        // Bootstrap below reports a direct, actionable launchctl error.
+        // bootstrap below reports a direct, actionable launchctl error
     }
 
     if (wasLoaded && fileChanged) {
