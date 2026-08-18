@@ -198,9 +198,10 @@ const credentials: CredentialStore = {
 };
 
 async function until(check: () => boolean): Promise<void> {
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
         if (check()) return;
-        await new Promise(resolve => setTimeout(resolve, 0));
+        await new Promise(resolve => setTimeout(resolve, 10));
     }
     throw new Error("condition was not reached");
 }
