@@ -1,6 +1,6 @@
 {
   "name": "t3-discord-presence",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Discord Rich Presence for T3 Code agent activity",
   "type": "module",
   "bin": {
