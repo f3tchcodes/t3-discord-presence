@@ -5,6 +5,7 @@ import {
     type CredentialStore,
     type StoredCredential,
 } from "../config/credentials.js";
+import { resolveT3CliCommand } from "./cli.js";
 import type { DiscoveredT3Server } from "./types.js";
 
 export const AUTH_CLIENT_LABEL = "t3 discord presence";
@@ -62,6 +63,7 @@ export interface ProcessAdapter {
 
 export interface PairingOptions {
     readonly executable?: string;
+    readonly argumentsPrefix?: ReadonlyArray<string>;
     readonly process?: ProcessAdapter;
     readonly env?: NodeJS.ProcessEnv;
     readonly label?: string;
@@ -297,13 +299,37 @@ export async function mintPairingCredential(
         ...(options.env ?? process.env),
         T3CODE_HOME: server.baseDir,
     };
-    const arguments_ = server.variant === "userdata"
+    const pairingArguments = server.variant === "userdata"
         ? ["auth", "pairing", "create", "--json", "--label", label]
         : ["pair", "--base-dir", server.baseDir, "--label", label];
+    let command: {
+        readonly executable: string;
+        readonly argumentsPrefix: ReadonlyArray<string>;
+    } | undefined;
+    if (
+        options.executable !== undefined
+        || options.argumentsPrefix !== undefined
+        || options.process !== undefined
+    ) {
+        command = {
+            executable: options.executable ?? "t3",
+            argumentsPrefix: options.argumentsPrefix ?? [],
+        };
+    } else {
+        command = await resolveT3CliCommand({
+            env,
+            runtimePid: server.runtime.pid,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+        });
+    }
+    if (command === undefined) {
+        throw new T3AuthError("could not find a supported T3 CLI", "pairing-unavailable");
+    }
+    const arguments_ = [...command.argumentsPrefix, ...pairingArguments];
     let result: ProcessResult;
     try {
         result = await processAdapter.run(
-            options.executable ?? "t3",
+            command.executable,
             arguments_,
             {
                 env,

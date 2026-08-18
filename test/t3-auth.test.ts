@@ -238,6 +238,49 @@ describe("T3 HTTP authentication", () => {
 });
 
 describe("official T3 CLI pairing", () => {
+    it("prepends a bundled CLI path without shell quoting", async () => {
+        const calls: Array<{
+            readonly executable: string;
+            readonly arguments_: ReadonlyArray<string>;
+        }> = [];
+        const processAdapter: ProcessAdapter = {
+            async run(executable, arguments_) {
+                calls.push({ executable, arguments_ });
+                return {
+                    exitCode: 0,
+                    stdout: JSON.stringify({
+                        credential: "bundled-pairing-token",
+                        scopes: ["orchestration:read"],
+                        expiresAt: "2026-08-18T10:05:00.000Z",
+                    }),
+                    stderr: "",
+                };
+            },
+        };
+        const bundled = "C:\\Program Files\\T3 Code\\resources\\app.asar.unpacked"
+            + "\\apps\\server\\dist\\bin.mjs";
+
+        await expect(mintPairingCredential(target("http://127.0.0.1:41773"), {
+            executable: "C:\\Program Files\\nodejs\\node.exe",
+            argumentsPrefix: [bundled],
+            process: processAdapter,
+            now: () => NOW,
+        })).resolves.toBe("bundled-pairing-token");
+        expect(calls).toEqual([{
+            executable: "C:\\Program Files\\nodejs\\node.exe",
+            arguments_: [
+                bundled,
+                "auth",
+                "pairing",
+                "create",
+                "--json",
+                "--label",
+                "t3 discord presence",
+            ],
+        }]);
+        expect(calls[0]?.arguments_[0]).not.toContain('"');
+    });
+
     it("targets verified userdata with T3CODE_HOME and parses JSON", async () => {
         const calls: Array<{
             readonly executable: string;
