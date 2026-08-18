@@ -7,16 +7,19 @@ import type { CredentialStore, StoredCredential } from "../src/config/credential
 import { resolveAppPaths } from "../src/config/paths.js";
 import { waitForAbortableDelay } from "../src/daemon/backoff.js";
 import {
-    applyDaemonEnvironment,
     type DiscordManagerRuntime,
+    DiscordManagerStoppedError,
     runDaemon,
 } from "../src/daemon/daemon.js";
 import {
+    acquireDaemonLock,
+    consumeStopRequest,
     DuplicateDaemonError,
     readDaemonLock,
     requestDaemonStop,
 } from "../src/daemon/lock.js";
 import { readDaemonStatus } from "../src/daemon/status.js";
+import { DISCORD_APPLICATION_ID } from "../src/discord/application.js";
 import type { DiscordManagerOptions } from "../src/discord/client.js";
 import type { DiscordActivity } from "../src/discord/types.js";
 import type { Logger, LogMetadata } from "../src/logging/logger.js";
@@ -42,6 +45,7 @@ function deferred<T>() {
 class MemoryLogger implements Logger {
     readonly entries: Array<{ message: string; metadata?: LogMetadata }> = [];
     closed = false;
+    onClose: (() => void | Promise<void>) | undefined;
 
     #write(message: string, metadata?: LogMetadata): Promise<void> {
         this.entries.push({ message, ...(metadata === undefined ? {} : { metadata }) });
@@ -68,9 +72,9 @@ class MemoryLogger implements Logger {
         return Promise.resolve();
     }
 
-    close(): Promise<void> {
+    async close(): Promise<void> {
         this.closed = true;
-        return Promise.resolve();
+        await this.onClose?.();
     }
 }
 
@@ -116,6 +120,10 @@ class FakeDiscordManager implements DiscordManagerRuntime {
     started = false;
     stopped = false;
 
+    get clientId(): string {
+        return this.#options.clientId;
+    }
+
     constructor(options: DiscordManagerOptions) {
         this.#options = options;
     }
@@ -136,6 +144,22 @@ class FakeDiscordManager implements DiscordManagerRuntime {
         }
         this.stopped = true;
         this.#options.onStateChange?.("stopped");
+    }
+}
+
+class UnexpectedDiscordManager implements DiscordManagerRuntime {
+    readonly #failure: boolean;
+
+    constructor(failure: boolean) {
+        this.#failure = failure;
+    }
+
+    setDesiredActivity(): boolean {
+        return false;
+    }
+
+    async run(): Promise<void> {
+        if (this.#failure) throw new Error("private discord failure detail");
     }
 }
 
@@ -195,7 +219,7 @@ function testPaths(root: string) {
 describe("daemon lifecycle", () => {
     const temp = useTempDirectory();
 
-    it("keeps Discord independent and cleans every owned resource on shutdown", async () => {
+    it("uses the built-in Discord application without config and cleans up", async () => {
         const paths = testPaths(temp.path("shutdown-home"));
         const controller = new AbortController();
         const logger = new MemoryLogger();
@@ -205,14 +229,10 @@ describe("daemon lifecycle", () => {
         const running = runDaemon({
             paths,
             signal: controller.signal,
-            env: { T3_DISCORD_CLIENT_ID: "environment-discord-id" },
             handleProcessSignals: false,
             timings: { heartbeatMs: 10, retryBaseMs: 1, retryMaxMs: 4 },
             dependencies: {
-                loadConfig: async () => ({
-                    ...DEFAULT_CONFIG,
-                    discord: { clientId: "discord-application-id" },
-                }),
+                loadConfig: async () => DEFAULT_CONFIG,
                 createCredentialStore: async () => credentials,
                 createLogger: () => logger,
                 createDiscordManager: options => {
@@ -234,6 +254,7 @@ describe("daemon lifecycle", () => {
 
         await until(() => session.shellHandler !== undefined);
         expect(discord?.started).toBe(true);
+        expect(discord?.clientId).toBe(DISCORD_APPLICATION_ID);
         expect(discord?.updates).toEqual([]);
         expect(connectRpc).toHaveBeenCalledOnce();
         expect(await readDaemonLock(paths.lockFile)).toBeDefined();
@@ -259,20 +280,6 @@ describe("daemon lifecycle", () => {
         });
     });
 
-    it("uses a non-empty environment client id ahead of config", () => {
-        expect(applyDaemonEnvironment({
-            ...DEFAULT_CONFIG,
-            discord: { clientId: "config-id", largeImageKey: "t3code" },
-        }, { T3_DISCORD_CLIENT_ID: "  environment-id  " })).toEqual({
-            ...DEFAULT_CONFIG,
-            discord: { clientId: "environment-id", largeImageKey: "t3code" },
-        });
-        expect(applyDaemonEnvironment({
-            ...DEFAULT_CONFIG,
-            discord: { clientId: "config-id" },
-        }, { T3_DISCORD_CLIENT_ID: "   " }).discord.clientId).toBe("config-id");
-    });
-
     it("honors a nonce-bound cooperative stop request", async () => {
         const paths = testPaths(temp.path("stop-home"));
         const logger = new MemoryLogger();
@@ -285,6 +292,9 @@ describe("daemon lifecycle", () => {
                 loadConfig: async () => DEFAULT_CONFIG,
                 createCredentialStore: async () => credentials,
                 createLogger: () => logger,
+                createDiscordManager: (options: DiscordManagerOptions) => (
+                    new FakeDiscordManager(options)
+                ),
                 discover: async () => undefined,
                 wait: waitForAbortableDelay,
             },
@@ -301,6 +311,70 @@ describe("daemon lifecycle", () => {
         expect(await readDaemonLock(paths.lockFile)).toBeUndefined();
     });
 
+    it("preserves a stop request created for a replacement after lock handoff", async () => {
+        const paths = testPaths(temp.path("handoff-home"));
+        const controller = new AbortController();
+        const logger = new MemoryLogger();
+        let replacement: Awaited<ReturnType<typeof acquireDaemonLock>> | undefined;
+        logger.onClose = async () => {
+            replacement = await acquireDaemonLock({
+                lockFile: paths.lockFile,
+                nonce: () => "replacement-daemon-owner",
+            });
+            await requestDaemonStop(paths.lockFile, paths.stopFile);
+        };
+        const running = runDaemon({
+            paths,
+            signal: controller.signal,
+            handleProcessSignals: false,
+            timings: { heartbeatMs: 100, t3PollMs: 100 },
+            nonce: () => "original-daemon-owner",
+            dependencies: {
+                loadConfig: async () => DEFAULT_CONFIG,
+                createCredentialStore: async () => credentials,
+                createLogger: () => logger,
+                createDiscordManager: options => new FakeDiscordManager(options),
+                discover: async () => undefined,
+                wait: waitForAbortableDelay,
+            },
+        });
+        await until(() => logger.entries.some(entry => entry.message === "waiting for t3"));
+
+        controller.abort();
+        await running;
+
+        expect(replacement).toBeDefined();
+        await expect(consumeStopRequest(paths.stopFile, "replacement-daemon-owner"))
+            .resolves.toBe(true);
+        await replacement?.release();
+    });
+
+    it.each([
+        ["resolves", false],
+        ["rejects", true],
+    ])("fails the daemon when the Discord manager %s unexpectedly", async (_label, failure) => {
+        const paths = testPaths(temp.path(`discord-failure-${String(failure)}`));
+        const logger = new MemoryLogger();
+        const running = runDaemon({
+            paths,
+            handleProcessSignals: false,
+            timings: { heartbeatMs: 100, t3PollMs: 100 },
+            dependencies: {
+                loadConfig: async () => DEFAULT_CONFIG,
+                createCredentialStore: async () => credentials,
+                createLogger: () => logger,
+                createDiscordManager: () => new UnexpectedDiscordManager(failure),
+                discover: async () => undefined,
+                wait: waitForAbortableDelay,
+            },
+        });
+
+        await expect(running).rejects.toBeInstanceOf(DiscordManagerStoppedError);
+        expect(await readDaemonLock(paths.lockFile)).toBeUndefined();
+        expect(logger.closed).toBe(true);
+        expect(JSON.stringify(logger.entries)).not.toContain("private discord failure detail");
+    });
+
     it("rejects a duplicate daemon without disturbing the owner", async () => {
         const paths = testPaths(temp.path("duplicate-home"));
         const ownerController = new AbortController();
@@ -313,6 +387,9 @@ describe("daemon lifecycle", () => {
                 loadConfig: async () => DEFAULT_CONFIG,
                 createCredentialStore: async () => credentials,
                 createLogger: () => logger,
+                createDiscordManager: (options: DiscordManagerOptions) => (
+                    new FakeDiscordManager(options)
+                ),
                 discover: async () => undefined,
                 wait: waitForAbortableDelay,
             },

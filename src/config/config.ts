@@ -12,7 +12,6 @@ export interface PresenceConfig {
 }
 
 export interface DiscordConfig {
-    readonly clientId?: string;
     readonly largeImageKey?: string;
     readonly smallImageKey?: string;
 }
@@ -41,7 +40,7 @@ const PRESENCE_KEYS = new Set([
     "showProvider",
     "showElapsedTime",
 ]);
-const DISCORD_KEYS = new Set(["clientId", "largeImageKey", "smallImageKey"]);
+const DISCORD_KEYS = new Set(["largeImageKey", "smallImageKey"]);
 
 export class ConfigError extends Error {
     override readonly name = "ConfigError";
@@ -126,12 +125,10 @@ function readDiscordConfig(value: unknown): DiscordConfig {
     }
     const discord = expectRecord(value, "config.discord");
     rejectUnknownKeys(discord, DISCORD_KEYS, "config.discord");
-    const clientId = optionalString(discord, "clientId");
     const largeImageKey = optionalString(discord, "largeImageKey");
     const smallImageKey = optionalString(discord, "smallImageKey");
 
     return {
-        ...(clientId === undefined ? {} : { clientId }),
         ...(largeImageKey === undefined ? {} : { largeImageKey }),
         ...(smallImageKey === undefined ? {} : { smallImageKey }),
     };

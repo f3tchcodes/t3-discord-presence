@@ -4,7 +4,7 @@ import { writeFileAtomic } from "../utils/atomic-file.js";
 
 export type DaemonRuntimeState = "running" | "stopping" | "stopped";
 export type T3ConnectionStatus = "waiting" | "connecting" | "connected" | "error";
-export type DiscordStatus = "unconfigured" | "waiting" | "connecting" | "connected" | "stopped";
+export type DiscordStatus = "waiting" | "connecting" | "connected" | "stopped";
 export type AuthStatus = "unknown" | "authorizing" | "valid" | "required" | "expired";
 
 export interface DaemonStatusSnapshot {
@@ -34,7 +34,6 @@ export interface DaemonStatusWriterOptions {
 const daemonStates = new Set<DaemonRuntimeState>(["running", "stopping", "stopped"]);
 const t3States = new Set<T3ConnectionStatus>(["waiting", "connecting", "connected", "error"]);
 const discordStates = new Set<DiscordStatus>([
-    "unconfigured",
     "waiting",
     "connecting",
     "connected",

@@ -59,15 +59,13 @@ describe("validateConfig", () => {
         });
     });
 
-    it("accepts optional Discord application and image keys", () => {
+    it("accepts optional Discord image keys without application configuration", () => {
         expect(validateConfig({
             discord: {
-                clientId: "123456789",
                 largeImageKey: "t3code",
                 smallImageKey: "codex",
             },
         }).discord).toEqual({
-            clientId: "123456789",
             largeImageKey: "t3code",
             smallImageKey: "codex",
         });
@@ -78,8 +76,8 @@ describe("validateConfig", () => {
             presence: { showProject: "yes" },
         })).toThrow("config.presence.showProject must be a boolean");
         expect(() => validateConfig({
-            discord: { clientId: "  " },
-        })).toThrow("config.discord.clientId must be a non-empty string");
+            discord: { largeImageKey: "  " },
+        })).toThrow("config.discord.largeImageKey must be a non-empty string");
     });
 
     it("does not allow credentials in the settings file", () => {
@@ -89,6 +87,9 @@ describe("validateConfig", () => {
         expect(() => validateConfig({
             discord: { authorization: "Bearer secret" },
         })).toThrow("config.discord.authorization is not a supported setting");
+        expect(() => validateConfig({
+            discord: { clientId: "legacy-application-id" },
+        })).toThrow("config.discord.clientId is not a supported setting");
     });
 
     it("rejects arrays, null, and unknown nested settings", () => {
@@ -114,14 +115,14 @@ describe("config persistence", () => {
         const filePath = join(root, "config.json");
         await writeFile(filePath, JSON.stringify({
             presence: { showElapsedTime: false },
-            discord: { clientId: "123" },
+            discord: { largeImageKey: "t3code" },
         }));
 
         const config = await loadConfig(filePath);
 
         expect(config.presence.showElapsedTime).toBe(false);
         expect(config.presence.showThread).toBe(false);
-        expect(config.discord.clientId).toBe("123");
+        expect(config.discord.largeImageKey).toBe("t3code");
     });
 
     it("reports malformed JSON without including its contents", async () => {

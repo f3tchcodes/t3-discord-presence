@@ -85,6 +85,29 @@ class FakeSession implements T3RpcSession {
     }
 }
 
+class DeferredSubscribeSession extends FakeSession {
+    readonly subscriptionStarted = deferred<void>();
+    readonly #subscriptionAllowed = deferred<void>();
+
+    allowSubscription(): void {
+        this.#subscriptionAllowed.resolve(undefined);
+    }
+
+    override async subscribeShell(
+        onItem: T3RpcStreamHandler,
+    ): Promise<T3RpcSubscription> {
+        this.subscriptionStarted.resolve(undefined);
+        await this.#subscriptionAllowed.promise;
+        return super.subscribeShell(onItem);
+    }
+}
+
+class FailedSubscribeSession extends FakeSession {
+    override async subscribeShell(): Promise<T3RpcSubscription> {
+        throw new Error("shell subscription failed");
+    }
+}
+
 class MemoryLogger implements Logger {
     readonly entries: Array<{ message: string; metadata?: LogMetadata }> = [];
     closed = false;
@@ -121,13 +144,18 @@ class MemoryLogger implements Logger {
 
 class MemoryPresence implements PresencePublisher {
     readonly updates: Array<DiscordActivity | null> = [];
+    readonly #reportsChanges: boolean;
+
+    constructor(reportsChanges = true) {
+        this.#reportsChanges = reportsChanges;
+    }
 
     setDesiredActivity(activity: DiscordActivity | null): boolean {
         const previous = JSON.stringify(this.updates.at(-1));
         const next = JSON.stringify(activity);
         if (previous === next) return false;
         this.updates.push(activity);
-        return true;
+        return this.#reportsChanges;
     }
 }
 
@@ -217,13 +245,17 @@ async function until(check: () => boolean): Promise<void> {
 }
 
 function harness(overrides: {
+    readonly controller?: AbortController;
     readonly discover?: () => Promise<DiscoveredT3Server | undefined>;
     readonly requestAuthorization?: () => Promise<WebSocketAuthorization>;
     readonly connectRpc?: () => Promise<T3RpcSession>;
+    readonly wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+    readonly pollIntervalMs?: number;
+    readonly presenceReportsChanges?: boolean;
 } = {}) {
-    const controller = new AbortController();
+    const controller = overrides.controller ?? new AbortController();
     const logger = new MemoryLogger();
-    const presence = new MemoryPresence();
+    const presence = new MemoryPresence(overrides.presenceReportsChanges ?? true);
     const credentials = credentialStore();
     const statuses: Array<DaemonStatusPatch> = [];
     const status = {
@@ -235,7 +267,7 @@ function harness(overrides: {
     const requestAuthorization = vi.fn(overrides.requestAuthorization ?? (async () => authorization));
     const connectRpc = vi.fn(overrides.connectRpc ?? (async () => new FakeSession()));
     const discover = vi.fn(overrides.discover ?? (async () => server));
-    const wait = vi.fn(async () => undefined);
+    const wait = vi.fn(overrides.wait ?? (async () => undefined));
     const run = runT3ConnectionLoop({
         config: DEFAULT_CONFIG,
         credentials: credentials.store,
@@ -243,6 +275,9 @@ function harness(overrides: {
         status,
         logger,
         signal: controller.signal,
+        ...(overrides.pollIntervalMs === undefined
+            ? {}
+            : { pollIntervalMs: overrides.pollIntervalMs }),
         retryBaseMs: 1,
         retryMaxMs: 4,
         dependencies: {
@@ -271,6 +306,83 @@ function harness(overrides: {
 }
 
 describe("T3 daemon connection loop", () => {
+    it("polls normally absent T3 instances on a fixed cadence", async () => {
+        const controller = new AbortController();
+        const delays: Array<number> = [];
+        const test = harness({
+            controller,
+            discover: async () => undefined,
+            pollIntervalMs: 4_321,
+            wait: async milliseconds => {
+                delays.push(milliseconds);
+                if (delays.length === 3) controller.abort();
+            },
+        });
+
+        await test.run;
+
+        expect(delays).toEqual([4_321, 4_321, 4_321]);
+        expect(test.authorize).not.toHaveBeenCalled();
+    });
+
+    it("does not report connected until the shell subscription succeeds", async () => {
+        const session = new DeferredSubscribeSession();
+        const test = harness({ connectRpc: async () => session });
+
+        await session.subscriptionStarted.promise;
+        expect(test.statuses).not.toContainEqual(expect.objectContaining({ t3: "connected" }));
+        expect(test.logger.entries.some(entry => entry.message === "connected to t3")).toBe(false);
+
+        session.allowSubscription();
+        await until(() => test.statuses.some(status => status.t3 === "connected"));
+        expect(test.logger.entries.some(entry => entry.message === "connected to t3")).toBe(true);
+
+        test.controller.abort();
+        await test.run;
+    });
+
+    it("keeps exponential failure backoff until a shell subscription succeeds", async () => {
+        const controller = new AbortController();
+        const delays: Array<number> = [];
+        const test = harness({
+            controller,
+            connectRpc: async () => new FailedSubscribeSession(),
+            wait: async milliseconds => {
+                delays.push(milliseconds);
+                if (delays.length === 3) controller.abort();
+            },
+        });
+
+        await test.run;
+
+        expect(delays).toEqual([1, 2, 4]);
+        expect(test.statuses).not.toContainEqual(expect.objectContaining({ t3: "connected" }));
+    });
+
+    it("resets failure backoff after a shell subscription succeeds", async () => {
+        const controller = new AbortController();
+        const connected = new FakeSession();
+        const delays: Array<number> = [];
+        let connectionAttempts = 0;
+        const test = harness({
+            controller,
+            connectRpc: async () => {
+                connectionAttempts += 1;
+                return connectionAttempts < 3 ? new FailedSubscribeSession() : connected;
+            },
+            wait: async milliseconds => {
+                delays.push(milliseconds);
+                if (delays.length === 3) controller.abort();
+            },
+        });
+
+        await until(() => connected.shellHandler !== undefined);
+        connected.disconnect();
+        await test.run;
+
+        expect(delays).toEqual([1, 2, 1]);
+    });
+
     it("waits for T3, publishes safe state, and follows only the selected active thread", async () => {
         const session = new FakeSession();
         let discoveryCalls = 0;
@@ -321,6 +433,103 @@ describe("T3 daemon connection loop", () => {
         await test.run;
         expect(test.presence.updates.at(-1)).toBeNull();
         expect(session.closeCalls).toBeGreaterThan(0);
+    });
+
+    it("logs only whitelisted stream metadata even without a Discord publisher change", async () => {
+        const session = new FakeSession();
+        const test = harness({
+            connectRpc: async () => session,
+            presenceReportsChanges: false,
+        });
+
+        await until(() => session.shellHandler !== undefined);
+        await session.shellHandler?.(shellSnapshot());
+        await session.shellHandler?.({
+            kind: "thread-upserted",
+            sequence: 11,
+            thread: {
+                id: "thread-1",
+                projectId: "project-1",
+                title: "do not log this private prompt title",
+                session: { status: "running", providerName: "Codex" },
+                latestTurn: {
+                    state: "running",
+                    startedAt: "2026-08-18T11:55:00.000Z",
+                    prompt: "do not log this prompt body",
+                },
+                updatedAt: "2026-08-18T11:59:30.000Z",
+                worktreePath: "C:\\private\\do-not-log-this-path",
+            },
+        });
+        await until(() => session.threadHandler !== undefined);
+        await session.threadHandler?.({
+            kind: "event",
+            event: {
+                sequence: 20,
+                aggregateId: "thread-1",
+                type: "thread.activity-appended",
+                createdAt: "2026-08-18T11:59:45.000Z",
+                payload: {
+                    threadId: "thread-1",
+                    prompt: "do not log nested prompt",
+                    path: "C:\\private\\nested-path",
+                    activity: {
+                        kind: "tool.started",
+                        createdAt: "2026-08-18T11:59:44.000Z",
+                        payload: {
+                            itemType: "command_execution",
+                            command: "curl -H Authorization: Bearer do-not-log-command",
+                        },
+                    },
+                },
+            },
+        });
+        await until(() => test.logger.entries.some(entry => entry.message === "t3 thread event"));
+
+        const debugEntries = test.logger.entries.filter(entry => (
+            entry.message === "t3 shell event"
+            || entry.message === "t3 thread event"
+            || entry.message === "presence selection changed"
+        ));
+        expect(debugEntries.some(entry => entry.message === "presence selection changed"))
+            .toBe(true);
+        for (const entry of debugEntries) {
+            expect(Object.keys(entry.metadata ?? {})).toEqual(expect.arrayContaining(["eventType"]));
+            expect(Object.keys(entry.metadata ?? {}).every(key => [
+                "eventType",
+                "threadId",
+                "sessionStatus",
+                "activityKind",
+                "timestamp",
+            ].includes(key))).toBe(true);
+        }
+        expect(debugEntries).toContainEqual(expect.objectContaining({
+            message: "t3 shell event",
+            metadata: {
+                eventType: "thread-upserted",
+                threadId: "thread-1",
+                sessionStatus: "running",
+                timestamp: "2026-08-18T11:59:30.000Z",
+            },
+        }));
+        expect(debugEntries).toContainEqual(expect.objectContaining({
+            message: "t3 thread event",
+            metadata: {
+                eventType: "thread.activity-appended",
+                threadId: "thread-1",
+                activityKind: "tool.started",
+                timestamp: "2026-08-18T11:59:44.000Z",
+            },
+        }));
+        const serializedLogs = JSON.stringify(test.logger.entries);
+        expect(serializedLogs).not.toContain("do not log");
+        expect(serializedLogs).not.toContain("do-not-log");
+        expect(serializedLogs).not.toContain("private\\\\");
+        expect(serializedLogs).not.toContain("payload");
+        expect(serializedLogs).not.toContain("prompt");
+
+        test.controller.abort();
+        await test.run;
     });
 
     it("clears presence when T3 disappears and reconnects with a fresh session", async () => {

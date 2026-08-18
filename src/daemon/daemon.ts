@@ -1,5 +1,3 @@
-import { rm } from "node:fs/promises";
-
 import {
     type AppConfig,
     loadConfig,
@@ -13,6 +11,9 @@ import {
     ensureAppDirectories,
     resolveAppPaths,
 } from "../config/paths.js";
+import {
+    DISCORD_APPLICATION_ID,
+} from "../discord/application.js";
 import {
     DiscordConnectionManager,
     type DiscordManagerOptions,
@@ -74,9 +75,9 @@ export interface DaemonDependencies {
 
 export interface DaemonTimings {
     readonly heartbeatMs?: number;
+    readonly t3PollMs?: number;
     readonly retryBaseMs?: number;
     readonly retryMaxMs?: number;
-    readonly staleLockMs?: number;
 }
 
 export interface RunDaemonOptions {
@@ -87,27 +88,17 @@ export interface RunDaemonOptions {
     readonly pid?: number;
     readonly entrypoint?: string;
     readonly nonce?: () => string;
-    readonly env?: NodeJS.ProcessEnv;
     readonly discovery?: DiscoveryOptions;
     readonly timings?: DaemonTimings;
     readonly dependencies?: Partial<DaemonDependencies>;
 }
 
-export const DISCORD_CLIENT_ID_ENV = "T3_DISCORD_CLIENT_ID";
+export class DiscordManagerStoppedError extends Error {
+    override readonly name = "DiscordManagerStoppedError";
 
-export function applyDaemonEnvironment(
-    config: AppConfig,
-    env: NodeJS.ProcessEnv = process.env,
-): AppConfig {
-    const clientId = env[DISCORD_CLIENT_ID_ENV]?.trim();
-    if (clientId === undefined || clientId.length === 0) return config;
-    if (clientId.length > 256) {
-        throw new Error(`${DISCORD_CLIENT_ID_ENV} must be at most 256 characters`);
+    constructor(options?: ErrorOptions) {
+        super("Discord connection manager stopped unexpectedly", options);
     }
-    return {
-        ...config,
-        discord: { ...config.discord, clientId },
-    };
 }
 
 function defaultDependencies(options: RunDaemonOptions): DaemonDependencies {
@@ -246,22 +237,14 @@ async function runMaintenanceLoop(
 }
 
 function startDiscord(
-    config: AppConfig,
     dependencies: DaemonDependencies,
     status: DaemonStatusWriter,
     logger: Logger,
     signal: AbortSignal,
-): { readonly manager?: DiscordManagerRuntime; readonly task?: Promise<void> } {
-    if (config.discord.clientId === undefined) {
-        updateStatus(status, {
-            discord: "unconfigured",
-            message: "Discord application is not configured",
-        }, logger);
-        return {};
-    }
+): { readonly manager: DiscordManagerRuntime; readonly task: Promise<void> } {
     let previous: DiscordConnectionState = "waiting";
     const manager = dependencies.createDiscordManager({
-        clientId: config.discord.clientId,
+        clientId: DISCORD_APPLICATION_ID,
         random: dependencies.random,
         onStateChange(state) {
             updateStatus(status, { discord: state }, logger);
@@ -278,14 +261,26 @@ function startDiscord(
             });
         },
     });
-    const task = manager.run(signal).catch(async error => {
-        if (!signal.aborted) {
-            updateStatus(status, { discord: "stopped" }, logger);
-            await safeLog(logger, "error", "discord connection manager stopped", {
-                errorType: safeErrorType(error),
-            });
-        }
-    });
+    const task = Promise.resolve()
+        .then(async () => manager.run(signal))
+        .then(
+            async () => {
+                if (signal.aborted) return;
+                updateStatus(status, { discord: "stopped" }, logger);
+                await safeLog(logger, "error", "discord connection manager stopped", {
+                    errorType: "Error",
+                });
+                throw new DiscordManagerStoppedError();
+            },
+            async error => {
+                if (signal.aborted) return;
+                updateStatus(status, { discord: "stopped" }, logger);
+                await safeLog(logger, "error", "discord connection manager stopped", {
+                    errorType: safeErrorType(error),
+                });
+                throw new DiscordManagerStoppedError({ cause: error });
+            },
+        );
     return { manager, task };
 }
 
@@ -293,7 +288,6 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<void> {
     const paths = options.paths ?? resolveAppPaths();
     const dependencies = resolveDependencies(options);
     const heartbeatMs = positiveTiming(options.timings?.heartbeatMs, 2_000, "heartbeatMs");
-    const staleLockMs = positiveTiming(options.timings?.staleLockMs, 15_000, "staleLockMs");
     const controller = new AbortController();
     await dependencies.ensureDirectories(paths);
     const lease = await dependencies.acquireLock({
@@ -301,7 +295,6 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<void> {
         ...(options.pid === undefined ? {} : { pid: options.pid }),
         ...(options.entrypoint === undefined ? {} : { entrypoint: options.entrypoint }),
         now: dependencies.now,
-        staleAfterMs: staleLockMs,
         ...(options.nonce === undefined ? {} : { nonce: options.nonce }),
     });
     const removeForwardedAbort = forwardAbortSignal(options.signal, controller);
@@ -313,6 +306,7 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<void> {
     let status: DaemonStatusWriter | undefined;
     let discord: DiscordManagerRuntime | undefined;
     let discordTask: Promise<void> | undefined;
+    let t3Task: Promise<void> | undefined;
     let maintenanceTask: Promise<void> | undefined;
     let failure: unknown;
 
@@ -345,13 +339,9 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<void> {
             }
         });
 
-        const config = applyDaemonEnvironment(
-            await dependencies.loadConfig(paths.configFile),
-            options.env ?? process.env,
-        );
+        const config = await dependencies.loadConfig(paths.configFile);
         const credentials = await dependencies.createCredentialStore(paths.credentialsFile);
         const startedDiscord = startDiscord(
-            config,
             dependencies,
             status,
             logger,
@@ -361,10 +351,10 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<void> {
         discordTask = startedDiscord.task;
         const presence: PresencePublisher = {
             setDesiredActivity(activity: DiscordActivity | null): boolean {
-                return discord?.setDesiredActivity(activity) ?? false;
+                return startedDiscord.manager.setDesiredActivity(activity);
             },
         };
-        await runT3ConnectionLoop({
+        t3Task = runT3ConnectionLoop({
             config,
             credentials,
             presence,
@@ -377,6 +367,9 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<void> {
             ...(options.timings?.retryMaxMs === undefined
                 ? {}
                 : { retryMaxMs: options.timings.retryMaxMs }),
+            ...(options.timings?.t3PollMs === undefined
+                ? {}
+                : { pollIntervalMs: options.timings.t3PollMs }),
             dependencies: {
                 discover: dependencies.discover,
                 authorize: dependencies.authorize,
@@ -387,6 +380,7 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<void> {
                 now: dependencies.now,
             },
         });
+        await Promise.race([t3Task, startedDiscord.task]);
     } catch (error) {
         failure = error;
         if (logger !== undefined) {
@@ -403,6 +397,7 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<void> {
         controller.abort();
         await Promise.allSettled([
             ...(discordTask === undefined ? [] : [discordTask]),
+            ...(t3Task === undefined ? [] : [t3Task]),
             ...(maintenanceTask === undefined ? [] : [maintenanceTask]),
         ]);
         await consumeStopRequest(paths.stopFile, lease.record.nonce).catch(() => undefined);
@@ -410,7 +405,7 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<void> {
             await status.update({
                 daemon: "stopped",
                 t3: "waiting",
-                discord: discord === undefined ? "unconfigured" : "stopped",
+                discord: "stopped",
                 message: "daemon stopped",
             }).catch(() => undefined);
             await status.flush().catch(() => undefined);
@@ -420,7 +415,6 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<void> {
             await safeLog(logger, "info", "daemon stopped");
             await logger.close().catch(() => undefined);
         }
-        await rm(paths.stopFile, { force: true }).catch(() => undefined);
         removeShutdownHandlers();
         removeForwardedAbort();
     }

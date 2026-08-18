@@ -36,6 +36,10 @@ describe("daemon status", () => {
         });
         expect(parseDaemonStatus(JSON.stringify({ ...writer.snapshot, t3: "invented" })))
             .toBeUndefined();
+        expect(parseDaemonStatus(JSON.stringify({
+            ...writer.snapshot,
+            discord: "unconfigured",
+        }))).toBeUndefined();
     });
 
     it("coalesces concurrent callers without corrupting the file", async () => {

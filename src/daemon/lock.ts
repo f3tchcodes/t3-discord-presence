@@ -27,7 +27,6 @@ export interface AcquireDaemonLockOptions {
     readonly entrypoint?: string;
     readonly now?: () => number;
     readonly nonce?: () => string;
-    readonly staleAfterMs?: number;
     readonly processIsRunning?: (pid: number) => boolean;
 }
 
@@ -129,10 +128,18 @@ async function readLock(filePath: string): Promise<{
     }
 }
 
-async function removeIfUnchanged(filePath: string, expectedContents: string): Promise<boolean> {
+async function removeIfUnchanged(
+    filePath: string,
+    expectedContents: string,
+    ownerIsRunning: (pid: number) => boolean,
+): Promise<boolean> {
     const current = await readLock(filePath);
     if (current === undefined) return true;
     if (current.contents !== expectedContents) return false;
+    // re-probe immediately before unlinking. the contents comparison catches a
+    // concurrent ownership change, while this second liveness check narrows the
+    // window where a just-started or pid-reused owner could be mistaken for a dead one.
+    if (current.record !== undefined && ownerIsRunning(current.record.pid)) return false;
     await rm(filePath, { force: true });
     return true;
 }
@@ -162,14 +169,12 @@ async function createLock(filePath: string, record: DaemonLockRecord): Promise<b
 
 export class DaemonLease {
     readonly #lockFile: string;
-    readonly #now: () => number;
     #record: DaemonLockRecord;
     #released = false;
 
-    constructor(lockFile: string, record: DaemonLockRecord, now: () => number) {
+    constructor(lockFile: string, record: DaemonLockRecord) {
         this.#lockFile = lockFile;
         this.#record = record;
-        this.#now = now;
     }
 
     get record(): DaemonLockRecord {
@@ -179,13 +184,11 @@ export class DaemonLease {
     async heartbeat(): Promise<boolean> {
         if (this.#released) return false;
         const current = await readLock(this.#lockFile);
-        if (current?.record?.nonce !== this.#record.nonce) return false;
-        this.#record = {
-            ...this.#record,
-            heartbeatAt: new Date(this.#now()).toISOString(),
-        };
-        await writeFileAtomic(this.#lockFile, `${JSON.stringify(this.#record)}\n`);
-        return true;
+        // ownership is defined by the live pid and nonce. do not rewrite the
+        // lock here: a read-then-replace heartbeat could overwrite a successor
+        // that acquired the lock between those operations. runtime liveness is
+        // recorded separately in the nonce-bound daemon status snapshot.
+        return current?.record?.nonce === this.#record.nonce;
     }
 
     async release(): Promise<void> {
@@ -202,11 +205,7 @@ export async function acquireDaemonLock(
     options: AcquireDaemonLockOptions,
 ): Promise<DaemonLease> {
     const now = options.now ?? Date.now;
-    const staleAfterMs = options.staleAfterMs ?? 15_000;
     const probe = options.processIsRunning ?? processIsRunning;
-    if (!Number.isFinite(staleAfterMs) || staleAfterMs < 0) {
-        throw new Error("stale lock threshold must be a non-negative number");
-    }
 
     for (let attempt = 0; attempt < 8; attempt += 1) {
         const timestamp = new Date(now()).toISOString();
@@ -222,23 +221,18 @@ export async function acquireDaemonLock(
             throw new Error("daemon lock metadata is invalid");
         }
         if (await createLock(options.lockFile, record)) {
-            return new DaemonLease(options.lockFile, record, now);
+            return new DaemonLease(options.lockFile, record);
         }
 
         const existing = await readLock(options.lockFile);
         if (existing === undefined) continue;
-        const heartbeat = existing.record === undefined
-            ? Number.NEGATIVE_INFINITY
-            : Date.parse(existing.record.heartbeatAt);
-        const isFresh = now() - heartbeat <= staleAfterMs;
-        if (
-            existing.record !== undefined
-            && isFresh
-            && probe(existing.record.pid)
-        ) {
+        // a sleeping or suspended daemon cannot refresh its heartbeat, but it
+        // still owns the lock. never reclaim a well-formed lock while its pid is
+        // alive; heartbeat age is diagnostic metadata, not proof of death.
+        if (existing.record !== undefined && probe(existing.record.pid)) {
             throw new DuplicateDaemonError(existing.record);
         }
-        await removeIfUnchanged(options.lockFile, existing.contents);
+        await removeIfUnchanged(options.lockFile, existing.contents, probe);
     }
     throw new Error("could not acquire the daemon lock after concurrent changes");
 }

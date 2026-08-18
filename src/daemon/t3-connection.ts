@@ -59,6 +59,7 @@ export interface T3ConnectionLoopOptions {
     readonly logger: Logger;
     readonly signal: AbortSignal;
     readonly dependencies: T3ConnectionDependencies;
+    readonly pollIntervalMs?: number;
     readonly retryBaseMs?: number;
     readonly retryMaxMs?: number;
 }
@@ -136,6 +137,105 @@ async function safeLog(
     await logger[level](message, metadata).catch(() => undefined);
 }
 
+type T3DebugMetadata = Readonly<{
+    eventType?: string;
+    threadId?: string;
+    sessionStatus?: string;
+    activityKind?: string;
+    timestamp?: string;
+}>;
+
+const debugSessionStatuses = new Set([
+    "idle",
+    "starting",
+    "running",
+    "ready",
+    "interrupted",
+    "stopped",
+    "error",
+    "working",
+    "monitoring",
+    "waiting-for-approval",
+    "waiting-for-input",
+]);
+
+function asRecord(value: unknown): Readonly<Record<string, unknown>> | undefined {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? value as Readonly<Record<string, unknown>>
+        : undefined;
+}
+
+function debugClassifier(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const candidate = value.trim();
+    return candidate.length > 0
+        && candidate.length <= 128
+        && /^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(candidate)
+        ? candidate
+        : undefined;
+}
+
+function debugThreadId(value: unknown): string | undefined {
+    const candidate = debugClassifier(value);
+    return candidate !== undefined && candidate.length <= 128 ? candidate : undefined;
+}
+
+function debugTimestamp(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const milliseconds = Date.parse(value);
+    return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : undefined;
+}
+
+function debugSessionStatus(value: unknown): string | undefined {
+    return typeof value === "string" && debugSessionStatuses.has(value) ? value : undefined;
+}
+
+function streamDebugMetadata(item: unknown, fallbackThreadId?: string): T3DebugMetadata {
+    const record = asRecord(item);
+    if (record === undefined) return {};
+    const event = asRecord(record.event);
+    const payload = asRecord(event?.payload);
+    const snapshot = asRecord(record.snapshot);
+    const thread = asRecord(record.thread)
+        ?? asRecord(payload?.thread)
+        ?? asRecord(snapshot?.thread);
+    const session = asRecord(thread?.session) ?? asRecord(payload?.session);
+    const activity = asRecord(payload?.activity);
+    const eventType = debugClassifier(event?.type) ?? debugClassifier(record.kind);
+    const threadId = debugThreadId(payload?.threadId)
+        ?? debugThreadId(thread?.id)
+        ?? debugThreadId(event?.aggregateId)
+        ?? debugThreadId(record.threadId)
+        ?? debugThreadId(fallbackThreadId);
+    const sessionStatus = debugSessionStatus(session?.status);
+    const activityKind = debugClassifier(activity?.kind);
+    const timestamp = debugTimestamp(activity?.createdAt)
+        ?? debugTimestamp(event?.createdAt)
+        ?? debugTimestamp(thread?.updatedAt)
+        ?? debugTimestamp(record.updatedAt);
+    return {
+        ...(eventType === undefined ? {} : { eventType }),
+        ...(threadId === undefined ? {} : { threadId }),
+        ...(sessionStatus === undefined ? {} : { sessionStatus }),
+        ...(activityKind === undefined ? {} : { activityKind }),
+        ...(timestamp === undefined ? {} : { timestamp }),
+    };
+}
+
+function selectionDebugMetadata(selected: SelectedPresenceSource): T3DebugMetadata {
+    const threadId = debugThreadId(selected.threadId);
+    const sessionStatus = debugSessionStatus(selected.status);
+    const activityKind = debugClassifier(selected.activity.replaceAll(" ", "-"));
+    const timestamp = debugTimestamp(selected.startedAt);
+    return {
+        eventType: "selection",
+        ...(threadId === undefined ? {} : { threadId }),
+        ...(sessionStatus === undefined ? {} : { sessionStatus }),
+        ...(activityKind === undefined ? {} : { activityKind }),
+        ...(timestamp === undefined ? {} : { timestamp }),
+    };
+}
+
 class ConnectedT3State {
     readonly #config: AppConfig;
     readonly #logger: Logger;
@@ -150,6 +250,7 @@ class ConnectedT3State {
     #focusedThreadId: string | undefined;
     #focusRevision = 0;
     #focusQueue: Promise<void> = Promise.resolve();
+    #selectionFingerprint: string | undefined;
 
     constructor(
         session: T3RpcSession,
@@ -164,11 +265,18 @@ class ConnectedT3State {
         this.#now = now;
     }
 
-    async run(): Promise<void> {
+    async subscribe(): Promise<void> {
         this.#shell = await this.#session.subscribeShell(item => {
+            void safeLog(this.#logger, "debug", "t3 shell event", streamDebugMetadata(item));
             this.#state = applyShellStreamItem(this.#state, item);
             this.#publishSelection();
         }, { signal: this.#signal, requestCompletionMarker: true });
+    }
+
+    async waitUntilClosed(): Promise<void> {
+        if (this.#shell === undefined) {
+            throw new Error("T3 shell subscription was not started");
+        }
         const aborted = waitForAbort(this.#signal);
         try {
             await Promise.race([
@@ -192,15 +300,25 @@ class ConnectedT3State {
 
     #publishSelection(): void {
         const selected = selectPresenceSource(this.#state, { now: this.#now() });
-        const changed = this.#presence.setDesiredActivity(buildDiscordActivity(selected, {
+        this.#presence.setDesiredActivity(buildDiscordActivity(selected, {
             presence: this.#config.presence,
             discord: this.#config.discord,
         }));
-        if (changed) {
-            void safeLog(this.#logger, "debug", "presence changed", {
-                status: selected.status,
-                activeAgentCount: selected.activeAgentCount,
-            });
+        const selectionFingerprint = JSON.stringify({
+            threadId: selected.threadId,
+            status: selected.status,
+            activity: selected.activity,
+            startedAt: selected.startedAt,
+            activeAgentCount: selected.activeAgentCount,
+        });
+        if (selectionFingerprint !== this.#selectionFingerprint) {
+            this.#selectionFingerprint = selectionFingerprint;
+            void safeLog(
+                this.#logger,
+                "debug",
+                "presence selection changed",
+                selectionDebugMetadata(selected),
+            );
         }
         this.#scheduleFocusedThread(selected);
     }
@@ -221,6 +339,12 @@ class ConnectedT3State {
                 const subscription = await this.#session.subscribeThread(
                     desiredThreadId,
                     item => {
+                        void safeLog(
+                            this.#logger,
+                            "debug",
+                            "t3 thread event",
+                            streamDebugMetadata(item, desiredThreadId),
+                        );
                         this.#state = applyThreadStreamItem(this.#state, desiredThreadId, item);
                         this.#publishSelection();
                     },
@@ -267,6 +391,10 @@ export async function runT3ConnectionLoop(options: T3ConnectionLoopOptions): Pro
     const wait = dependencies.wait ?? waitForAbortableDelay;
     const random = dependencies.random ?? Math.random;
     const now = dependencies.now ?? Date.now;
+    const pollIntervalMs = options.pollIntervalMs ?? 3_000;
+    if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1) {
+        throw new RangeError("pollIntervalMs must be a positive safe integer");
+    }
     let attempt = 0;
     let forceAuthorization = false;
     let waitingWasLogged = false;
@@ -274,12 +402,15 @@ export async function runT3ConnectionLoop(options: T3ConnectionLoopOptions): Pro
     while (!signal.aborted) {
         let server: DiscoveredT3Server | undefined;
         let connected: ConnectedT3State | undefined;
+        let serverWasAbsent = false;
         let phase: "discovery" | "authorization" | "ticket" | "rpc" | "subscription" = "discovery";
         try {
             await status.update({ t3: "waiting", message: "waiting for T3 Code" });
             server = await dependencies.discover(signal);
             if (signal.aborted) break;
             if (server === undefined) {
+                serverWasAbsent = true;
+                attempt = 0;
                 if (!waitingWasLogged) {
                     waitingWasLogged = true;
                     await safeLog(logger, "info", "waiting for t3");
@@ -314,8 +445,9 @@ export async function runT3ConnectionLoop(options: T3ConnectionLoopOptions): Pro
                 phase = "rpc";
                 const session = await dependencies.connectRpc(authorization, signal);
                 connected = new ConnectedT3State(session, options, now);
-                attempt = 0;
                 phase = "subscription";
+                await connected.subscribe();
+                attempt = 0;
                 await status.update({
                     t3: "connected",
                     auth: "valid",
@@ -325,7 +457,7 @@ export async function runT3ConnectionLoop(options: T3ConnectionLoopOptions): Pro
                     environmentId: server.descriptor.environmentId,
                     serverVersion: server.descriptor.serverVersion,
                 });
-                await connected.run();
+                await connected.waitUntilClosed();
                 if (!signal.aborted) throw new Error("T3 subscription ended");
             }
         } catch (error) {
@@ -352,13 +484,15 @@ export async function runT3ConnectionLoop(options: T3ConnectionLoopOptions): Pro
 
         if (signal.aborted) break;
         await status.update({ t3: "waiting", message: "waiting for T3 Code" });
-        const delay = reconnectDelay(
-            attempt,
-            options.retryBaseMs,
-            options.retryMaxMs,
-            random,
-        );
-        attempt += 1;
+        const delay = serverWasAbsent
+            ? pollIntervalMs
+            : reconnectDelay(
+                attempt,
+                options.retryBaseMs,
+                options.retryMaxMs,
+                random,
+            );
+        if (!serverWasAbsent) attempt += 1;
         try {
             await wait(delay, signal);
         } catch (error) {
