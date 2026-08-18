@@ -242,6 +242,7 @@ class ConnectedT3State {
     readonly #presence: PresencePublisher;
     readonly #session: T3RpcSession;
     readonly #signal: AbortSignal;
+    readonly #sessionStartedAt: string;
     readonly #now: () => number;
     readonly #failure = deferredFailure();
     #state: PresenceSourceState = createPresenceSourceState();
@@ -256,6 +257,7 @@ class ConnectedT3State {
         session: T3RpcSession,
         options: Pick<T3ConnectionLoopOptions, "config" | "logger" | "presence" | "signal">,
         now: () => number,
+        sessionStartedAt: string,
     ) {
         this.#session = session;
         this.#config = options.config;
@@ -263,6 +265,7 @@ class ConnectedT3State {
         this.#presence = options.presence;
         this.#signal = options.signal;
         this.#now = now;
+        this.#sessionStartedAt = sessionStartedAt;
     }
 
     async subscribe(): Promise<void> {
@@ -303,6 +306,7 @@ class ConnectedT3State {
         this.#presence.setDesiredActivity(buildDiscordActivity(selected, {
             presence: this.#config.presence,
             discord: this.#config.discord,
+            sessionStartedAt: this.#sessionStartedAt,
         }));
         const selectionFingerprint = JSON.stringify({
             threadId: selected.threadId,
@@ -444,7 +448,12 @@ export async function runT3ConnectionLoop(options: T3ConnectionLoopOptions): Pro
                 );
                 phase = "rpc";
                 const session = await dependencies.connectRpc(authorization, signal);
-                connected = new ConnectedT3State(session, options, now);
+                connected = new ConnectedT3State(
+                    session,
+                    options,
+                    now,
+                    server.runtime.startedAt,
+                );
                 phase = "subscription";
                 await connected.subscribe();
                 attempt = 0;

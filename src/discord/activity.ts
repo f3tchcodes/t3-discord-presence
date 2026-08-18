@@ -12,6 +12,7 @@ export const DISCORD_ACTIVITY_TEXT_LIMIT = 128;
 export interface DiscordActivityBuildOptions {
     readonly presence: PresenceConfig;
     readonly discord?: Pick<DiscordConfig, "largeImageKey" | "smallImageKey">;
+    readonly sessionStartedAt?: string;
 }
 
 const additionalSafeActivities = new Set([
@@ -114,16 +115,21 @@ function agentState(source: SelectedPresenceSource, activity: string): string {
     return activity;
 }
 
-function activeTimestamp(source: SelectedPresenceSource, showElapsedTime: boolean): number | undefined {
-    if (!showElapsedTime || source.startedAt === undefined) return undefined;
+function elapsedTimestamp(
+    source: SelectedPresenceSource,
+    showElapsedTime: boolean,
+    sessionStartedAt?: string,
+): number | undefined {
+    if (!showElapsedTime) return undefined;
     const active = source.status === "running"
         || source.status === "starting"
         || source.status === "working"
         || source.status === "monitoring"
         || source.status === "waiting-for-approval"
         || source.status === "waiting-for-input";
-    if (!active) return undefined;
-    const milliseconds = Date.parse(source.startedAt);
+    const startedAt = sessionStartedAt ?? (active ? source.startedAt : undefined);
+    if (startedAt === undefined) return undefined;
+    const milliseconds = Date.parse(startedAt);
     return Number.isFinite(milliseconds) && milliseconds > 0 ? milliseconds : undefined;
 }
 
@@ -140,7 +146,11 @@ export function buildDiscordActivity(
         agentState(source, activity),
         ...(!hasImage && model !== undefined ? [model] : []),
     ].join(" · "));
-    const startTimestamp = activeTimestamp(source, options.presence.showElapsedTime);
+    const startTimestamp = elapsedTimestamp(
+        source,
+        options.presence.showElapsedTime,
+        options.sessionStartedAt,
+    );
 
     return {
         details: contextDetails(source, options.presence),

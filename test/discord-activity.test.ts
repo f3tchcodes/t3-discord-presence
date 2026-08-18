@@ -104,6 +104,26 @@ describe("Discord activity builder", () => {
             .not.toHaveProperty("startTimestamp");
     });
 
+    it("uses the stable T3 runtime time when no turn is active", () => {
+        const sessionStartedAt = "2026-08-18T08:00:00.000Z";
+        const idleSource: SelectedPresenceSource = {
+            status: "idle",
+            activity: "idle",
+            activeAgentCount: 0,
+        };
+        const idle = buildDiscordActivity(idleSource, {
+            ...visible,
+            sessionStartedAt,
+        });
+        const active = buildDiscordActivity(source(), {
+            ...visible,
+            sessionStartedAt,
+        });
+
+        expect(idle.startTimestamp).toBe(Date.parse(sessionStartedAt));
+        expect(active.startTimestamp).toBe(Date.parse(sessionStartedAt));
+    });
+
     it("summarizes multiple active agents", () => {
         expect(buildDiscordActivity(source({ activeAgentCount: 3 }), visible).state).toBe(
             "3 agents working · Codex · gpt-5.6",

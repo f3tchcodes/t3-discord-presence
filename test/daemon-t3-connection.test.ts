@@ -435,6 +435,28 @@ describe("T3 daemon connection loop", () => {
         expect(session.closeCalls).toBeGreaterThan(0);
     });
 
+    it("keeps the T3 runtime timer stable while the runtime stays open", async () => {
+        const session = new FakeSession();
+        const test = harness({ connectRpc: async () => session });
+
+        await until(() => session.shellHandler !== undefined);
+        await session.shellHandler?.({
+            kind: "snapshot",
+            snapshot: {
+                snapshotSequence: 1,
+                projects: [],
+                threads: [],
+            },
+        });
+        await until(() => test.presence.updates.some(update => update?.state === "idle"));
+
+        expect(test.presence.updates.find(update => update?.state === "idle"))
+            .toMatchObject({ startTimestamp: Date.parse(server.runtime.startedAt) });
+
+        test.controller.abort();
+        await test.run;
+    });
+
     it("logs only whitelisted stream metadata even without a Discord publisher change", async () => {
         const session = new FakeSession();
         const test = harness({
