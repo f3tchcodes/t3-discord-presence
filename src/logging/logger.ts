@@ -64,6 +64,11 @@ const SENSITIVE_KEYS = new Set([
     "rawcommand",
     "payload",
     "activitypayload",
+    "path",
+    "filepath",
+    "directory",
+    "cwd",
+    "entrypoint",
     "workspaceroot",
     "worktreepath",
 ]);
@@ -100,12 +105,17 @@ function redactString(value: string): string {
         )
         .replaceAll(/\bbearer\s+[^\s,;"']+/gi, `Bearer ${REDACTED}`)
         .replaceAll(
-            /\b(access[_-]?token|refresh[_-]?token|subject[_-]?token|pairing[_-]?token|bearer[_-]?token|id[_-]?token|token|api[_-]?key|password|credential|secret)(\s*[:=]\s*)[^\s&,;"']+/gi,
+            /\b(access[_-]?token|refresh[_-]?token|subject[_-]?token|pairing[_-]?token|bearer[_-]?token|id[_-]?token|ws[_-]?ticket|ticket|token|api[_-]?key|password|credential|secret)(\s*[:=]\s*)[^\s&,;"']+/gi,
             `$1$2${REDACTED}`,
         )
         .replaceAll(
             /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
             REDACTED,
+        )
+        .replaceAll(/(?:[A-Za-z]:\\|\\\\)[^\s,;"'<>]+/g, "[path]")
+        .replaceAll(
+            /(^|[\s("'=])\/(?:Users|home|private|tmp|var\/folders|workspace|workspaces)\/[^\s,;"')<>]+/g,
+            "$1[path]",
         );
 }
 

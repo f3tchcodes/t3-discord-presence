@@ -62,7 +62,7 @@ describe("FileLogger", () => {
         cyclic.self = cyclic;
 
         await logger.error(
-            "request failed authorization: Bearer message-secret; access_token=query-secret token=plain-secret",
+            "request failed authorization: Bearer message-secret; access_token=query-secret token=plain-secret wsTicket=socket-secret at C:\\private\\source.ts and /home/ada/private/source.ts",
             {
                 authorization: "Bearer header-secret",
                 accessToken: "access-secret",
@@ -74,6 +74,7 @@ describe("FileLogger", () => {
                     safe: "Authorization=Basic basic-secret",
                 },
                 cyclic,
+                path: "D:\\customer\\workspace",
             },
         );
         await logger.close();
@@ -90,6 +91,10 @@ describe("FileLogger", () => {
             "private prompt",
             "rm private-file",
             "basic-secret",
+            "socket-secret",
+            "C:\\private\\source.ts",
+            "/home/ada/private/source.ts",
+            "D:\\customer\\workspace",
         ]) {
             expect(contents).not.toContain(secret);
         }
